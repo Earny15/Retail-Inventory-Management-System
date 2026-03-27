@@ -1,17 +1,17 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../services/supabase'
-import { useAuth } from './useAuth.simple.jsx'
+import { useAuth } from './useAuth'
 import toast from 'react-hot-toast'
 
 export function useSKUs() {
   const queryClient = useQueryClient()
   const { user } = useAuth()
 
-  // Fetch SKUs with categories and inventory
   const {
     data: skus = [],
     isLoading,
-    error
+    error,
+    refetch: refetchSKUs
   } = useQuery({
     queryKey: ['skus'],
     queryFn: async () => {
@@ -20,19 +20,18 @@ export function useSKUs() {
         .select(`
           *,
           category:sku_categories(id, category_name),
-          inventory(current_stock, available_stock)
+          inventory(current_stock)
         `)
         .order('created_at', { ascending: false })
-
       if (error) throw error
       return data || []
     }
   })
 
-  // Fetch SKU categories
   const {
     data: categories = [],
-    isLoading: categoriesLoading
+    isLoading: categoriesLoading,
+    refetch: refetchCategories
   } = useQuery({
     queryKey: ['sku-categories'],
     queryFn: async () => {
@@ -41,66 +40,41 @@ export function useSKUs() {
         .select('*')
         .eq('is_active', true)
         .order('category_name')
-
       if (error) throw error
       return data || []
     }
   })
 
-  // Create SKU mutation
   const createSKUMutation = useMutation({
     mutationFn: async (skuData) => {
-      // Start transaction
-      // Map form fields to database fields
-      const processedData = {
-        ...skuData,
-        // Handle development mode where user might be null
-        ...(user?.id && { created_by: user.id })
-      }
+      const processedData = { ...skuData }
+      if (!processedData.category_id) delete processedData.category_id
+      if (user?.id) processedData.created_by = user.id
 
-      // Remove empty sku_code to let database trigger generate it
-      if (processedData.sku_code === '' || processedData.sku_code === null || processedData.sku_code === undefined) {
-        delete processedData.sku_code
+      // Auto-generate SKU code if not provided (fallback if DB trigger is missing)
+      if (!processedData.sku_code) {
+        const { count } = await supabase.from('skus').select('*', { count: 'exact', head: true })
+        processedData.sku_code = `SKU-${String((count || 0) + 1).padStart(4, '0')}`
       }
-
-      // Map form fields to database fields
-      const fieldMapping = {
-        primary_uom: 'unit_of_measure',
-        // Remove default_selling_price since it doesn't exist in the database schema
-        default_selling_price: null  // Will be removed from data
-      }
-
-      Object.keys(fieldMapping).forEach(formField => {
-        if (processedData[formField] !== undefined) {
-          if (fieldMapping[formField] === null) {
-            // Remove fields that don't exist in database
-            delete processedData[formField]
-          } else {
-            // Map to correct database field
-            processedData[fieldMapping[formField]] = processedData[formField]
-            delete processedData[formField]
-          }
-        }
-      })
 
       const { data: sku, error: skuError } = await supabase
         .from('skus')
         .insert(processedData)
         .select()
         .single()
-
       if (skuError) throw skuError
 
-      // Create inventory record
-      const { error: inventoryError } = await supabase
-        .from('inventory')
-        .insert({
-          sku_id: sku.id,
-          current_stock: 0,
-          available_stock: 0
-        })
-
-      if (inventoryError) throw inventoryError
+      // Create inventory record with quantity 0
+      const { error: invError } = await supabase.from('inventory').insert({
+        sku_id: sku.id,
+        current_stock: 0,
+        available_stock: 0,
+        reserved_stock: 0
+      })
+      if (invError) {
+        console.error('Failed to create inventory record:', invError)
+        // Don't throw - SKU was created, inventory can be created on first inward
+      }
 
       return sku
     },
@@ -109,49 +83,19 @@ export function useSKUs() {
       toast.success('SKU created successfully')
     },
     onError: (error) => {
-      console.error('Error creating SKU:', error)
-      const errorMessage = error.message || 'Failed to create SKU'
-      toast.error(`SKU creation failed: ${errorMessage}`)
+      toast.error(`Failed: ${error.message}`)
     }
   })
 
-  // Update SKU mutation
   const updateSKUMutation = useMutation({
     mutationFn: async ({ id, ...skuData }) => {
-      // Map form fields to database fields
-      const processedData = { ...skuData }
-
-      // Remove empty sku_code to let database trigger generate it
-      if (processedData.sku_code === '' || processedData.sku_code === null || processedData.sku_code === undefined) {
-        delete processedData.sku_code
-      }
-
-      const fieldMapping = {
-        primary_uom: 'unit_of_measure',
-        // Remove default_selling_price since it doesn't exist in the database schema
-        default_selling_price: null  // Will be removed from data
-      }
-
-      Object.keys(fieldMapping).forEach(formField => {
-        if (processedData[formField] !== undefined) {
-          if (fieldMapping[formField] === null) {
-            // Remove fields that don't exist in database
-            delete processedData[formField]
-          } else {
-            // Map to correct database field
-            processedData[fieldMapping[formField]] = processedData[formField]
-            delete processedData[formField]
-          }
-        }
-      })
-
+      if (!skuData.category_id) skuData.category_id = null
       const { data, error } = await supabase
         .from('skus')
-        .update(processedData)
+        .update(skuData)
         .eq('id', id)
         .select()
         .single()
-
       if (error) throw error
       return data
     },
@@ -160,29 +104,20 @@ export function useSKUs() {
       toast.success('SKU updated successfully')
     },
     onError: (error) => {
-      console.error('Error updating SKU:', error)
-      toast.error('Failed to update SKU')
+      toast.error(`Failed: ${error.message}`)
     }
   })
 
-  // Toggle SKU active status
   const toggleSKUStatusMutation = useMutation({
     mutationFn: async ({ id, is_active }) => {
-      const { error } = await supabase
-        .from('skus')
-        .update({ is_active })
-        .eq('id', id)
-
+      const { error } = await supabase.from('skus').update({ is_active }).eq('id', id)
       if (error) throw error
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['skus'] })
       toast.success('SKU status updated')
     },
-    onError: (error) => {
-      console.error('Error updating SKU status:', error)
-      toast.error('Failed to update SKU status')
-    }
+    onError: () => toast.error('Failed to update status')
   })
 
   return {
@@ -194,6 +129,7 @@ export function useSKUs() {
     updateSKU: updateSKUMutation.mutate,
     toggleSKUStatus: toggleSKUStatusMutation.mutate,
     isCreating: createSKUMutation.isPending,
-    isUpdating: updateSKUMutation.isPending
+    isUpdating: updateSKUMutation.isPending,
+    refetch: () => { refetchSKUs(); refetchCategories() }
   }
 }

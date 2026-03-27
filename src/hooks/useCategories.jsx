@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../services/supabase'
-import { useAuth } from './useAuth.simple.jsx'
+import { useAuth } from './useAuth'
 import toast from 'react-hot-toast'
 
 export function useCategories() {

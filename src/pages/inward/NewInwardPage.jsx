@@ -1,10 +1,10 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useVendors } from '../../hooks/useVendors.jsx'
-import { useSKUs } from '../../hooks/useSKUs.jsx'
-import { useAuth } from '../../hooks/useAuth.simple.jsx'
+import { useQuery } from '@tanstack/react-query'
+import { supabase } from '../../services/supabase'
+import { useAuth } from '../../hooks/useAuth'
 import { extractVendorInvoice, fileToBase64 } from '../../services/anthropic'
-import { confirmInward, saveInwardSession } from '../../services/inwardService'
+import { confirmInward } from '../../services/inwardService'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -12,18 +12,18 @@ import Select from '../../components/ui/Select'
 import Input from '../../components/ui/Input'
 import { Badge } from '../../components/ui/Badge'
 import { Spinner } from '../../components/ui/Spinner'
-import { Modal } from '../../components/ui/Modal'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '../../components/ui/Table'
 import {
   Upload,
   FileText,
   Brain,
   CheckCircle,
-  AlertTriangle,
   X,
   ChevronLeft,
   ChevronRight,
-  Save
+  Save,
+  Trash2,
+  Camera
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -32,7 +32,8 @@ const STEPS = {
   UPLOAD_INVOICE: 2,
   AI_PROCESSING: 3,
   REVIEW_ITEMS: 4,
-  SAVE_ALIASES: 5
+  CONFIRM: 5,
+  SAVE_ALIASES: 6
 }
 
 const STEP_NAMES = {
@@ -40,10 +41,11 @@ const STEP_NAMES = {
   2: 'Upload Invoice',
   3: 'AI Processing',
   4: 'Review Items',
-  5: 'Save Aliases'
+  5: 'Confirm',
+  6: 'Save Aliases'
 }
 
-const units = [
+const UNIT_OPTIONS = [
   { value: 'PCS', label: 'PCS' },
   { value: 'KGS', label: 'KGS' },
   { value: 'MTR', label: 'MTR' },
@@ -53,20 +55,73 @@ const units = [
 ]
 
 function ConfidenceBadge({ confidence }) {
-  if (confidence >= 80) {
-    return <Badge variant="success">{confidence}%</Badge>
-  } else if (confidence >= 50) {
-    return <Badge variant="warning">{confidence}%</Badge>
-  } else {
-    return <Badge variant="danger">{confidence}%</Badge>
-  }
+  if (confidence >= 80) return <Badge variant="success">{confidence}%</Badge>
+  if (confidence >= 50) return <Badge variant="warning">{confidence}%</Badge>
+  return <Badge variant="danger">{confidence}%</Badge>
+}
+
+function StepIndicator({ currentStep }) {
+  return (
+    <Card className="mb-6">
+      <CardContent className="py-4">
+        {/* Desktop */}
+        <div className="hidden md:flex items-center justify-between">
+          {Object.entries(STEP_NAMES).map(([step, name]) => {
+            const stepNum = parseInt(step)
+            const isActive = stepNum === currentStep
+            const isCompleted = stepNum < currentStep
+
+            return (
+              <div key={step} className="flex items-center">
+                <div className={`
+                  flex items-center justify-center w-8 h-8 rounded-full border-2 text-sm font-semibold
+                  ${isCompleted ? 'bg-green-500 border-green-500 text-white' :
+                    isActive ? 'bg-blue-500 border-navy-500 text-white' :
+                    'border-gray-300 text-gray-400'}
+                `}>
+                  {isCompleted ? <CheckCircle className="h-4 w-4" /> : stepNum}
+                </div>
+                <span className={`ml-2 text-sm ${isActive ? 'font-semibold' : 'text-gray-500'}`}>
+                  {name}
+                </span>
+                {stepNum < Object.keys(STEP_NAMES).length && (
+                  <ChevronRight className="h-4 w-4 mx-3 text-gray-400" />
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Mobile */}
+        <div className="md:hidden">
+          <div className="flex items-center justify-center mb-3">
+            <span className="text-sm font-medium text-gray-600">
+              Step {currentStep} of {Object.keys(STEP_NAMES).length}
+            </span>
+          </div>
+          <div className="flex items-center justify-center">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full border-2 text-sm font-semibold bg-blue-500 border-navy-500 text-white mr-3">
+              {currentStep}
+            </div>
+            <div>
+              <div className="font-semibold text-gray-900">{STEP_NAMES[currentStep]}</div>
+            </div>
+          </div>
+          <div className="mt-3 bg-gray-200 rounded-full h-2">
+            <div
+              className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+              style={{ width: `${(currentStep / Object.keys(STEP_NAMES).length) * 100}%` }}
+            />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
 }
 
 export default function NewInwardPage() {
   const navigate = useNavigate()
   const { user } = useAuth()
-  const { vendors, isLoading: vendorsLoading } = useVendors()
-  const { skus, isLoading: skusLoading } = useSKUs()
 
   const [currentStep, setCurrentStep] = useState(STEPS.SELECT_VENDOR)
   const [selectedVendor, setSelectedVendor] = useState(null)
@@ -81,63 +136,66 @@ export default function NewInwardPage() {
     invoice_date: '',
     notes: ''
   })
-  const [sessionId, setSessionId] = useState(null)
-  const [aliasesToSave, setAliasesToSave] = useState([])
   const [isConfirming, setIsConfirming] = useState(false)
+  const [aliasesToSave, setAliasesToSave] = useState([])
+  const [aliasChecked, setAliasChecked] = useState({})
 
-  // Vendor options for dropdown
-  const vendorOptions = vendors
-    .filter(v => v.is_active)
-    .map(v => ({
+  // Fetch vendors
+  const { data: vendors = [], isLoading: vendorsLoading } = useQuery({
+    queryKey: ['vendors'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('vendors')
+        .select('*')
+        .eq('is_active', true)
+        .order('vendor_name')
+      if (error) throw error
+      return data
+    }
+  })
+
+  // Fetch SKUs
+  const { data: skus = [], isLoading: skusLoading } = useQuery({
+    queryKey: ['skus'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('skus')
+        .select('*')
+        .eq('is_active', true)
+        .order('sku_name')
+      if (error) throw error
+      return data
+    }
+  })
+
+  const vendorOptions = useMemo(() =>
+    vendors.map(v => ({
       value: v.id,
       label: `${v.vendor_code} - ${v.vendor_name}`
-    }))
+    })),
+    [vendors]
+  )
 
-  // SKU options for dropdown
-  const skuOptions = skus
-    .filter(s => s.is_active)
-    .map(s => ({
+  const skuOptions = useMemo(() =>
+    skus.map(s => ({
       value: s.id,
       label: `${s.sku_code} - ${s.sku_name}`,
       sku_name: s.sku_name,
       unit_of_measure: s.unit_of_measure
-    }))
+    })),
+    [skus]
+  )
 
-  const handleVendorSelect = (selectedOption) => {
-    const vendor = vendors.find(v => v.id === selectedOption?.value)
-    setSelectedVendor(vendor)
-  }
-
-  const handleNextStep = () => {
-    if (currentStep === STEPS.SELECT_VENDOR && !selectedVendor) {
-      toast.error('Please select a vendor')
-      return
-    }
-
-    if (currentStep === STEPS.UPLOAD_INVOICE && !uploadedFile) {
-      toast.error('Please upload an invoice')
-      return
-    }
-
-    setCurrentStep(prev => prev + 1)
-  }
-
-  const handlePrevStep = () => {
-    setCurrentStep(prev => prev - 1)
-  }
-
+  // File upload handlers
   const handleFileUpload = useCallback((event) => {
-    const file = event.target.files[0]
+    const file = event.target.files?.[0]
     if (!file) return
 
-    // Validate file type
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf']
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
     if (!allowedTypes.includes(file.type)) {
-      toast.error('Please upload a JPG, PNG, or PDF file')
+      toast.error('Please upload a JPG, PNG, or WebP image')
       return
     }
-
-    // Validate file size (10MB max)
     if (file.size > 10 * 1024 * 1024) {
       toast.error('File size must be less than 10MB')
       return
@@ -145,18 +203,24 @@ export default function NewInwardPage() {
 
     setUploadedFile(file)
 
-    // Create preview
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader()
-      reader.onload = (e) => {
-        setFilePreview(e.target.result)
-      }
-      reader.readAsDataURL(file)
-    } else if (file.type === 'application/pdf') {
-      setFilePreview('pdf')
-    }
+    const reader = new FileReader()
+    reader.onload = (e) => setFilePreview(e.target.result)
+    reader.readAsDataURL(file)
   }, [])
 
+  const handleDrop = useCallback((e) => {
+    e.preventDefault()
+    const file = e.dataTransfer.files?.[0]
+    if (file) {
+      handleFileUpload({ target: { files: [file] } })
+    }
+  }, [handleFileUpload])
+
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault()
+  }, [])
+
+  // AI Processing
   const handleAIProcessing = async () => {
     if (!uploadedFile || !selectedVendor) return
 
@@ -164,39 +228,25 @@ export default function NewInwardPage() {
     setProcessingMessages([])
 
     try {
-      // Step 1: Convert file to base64
       setProcessingMessages(prev => [...prev, 'Converting file to base64...'])
       const base64 = await fileToBase64(uploadedFile)
 
-      // Step 2: Get vendor aliases
+      // Fetch vendor aliases
       setProcessingMessages(prev => [...prev, 'Loading vendor SKU aliases...'])
-      // TODO: Fetch vendor aliases from vendor_sku_aliases table
-      const vendorAliases = []
+      const { data: vendorAliases = [] } = await supabase
+        .from('vendor_sku_aliases')
+        .select('*')
+        .eq('vendor_id', selectedVendor.id)
 
-      // Step 3: Prepare SKU list for AI
       setProcessingMessages(prev => [...prev, 'Preparing SKU catalogue...'])
-      const skuList = skus
-        .filter(s => s.is_active)
-        .map(s => ({
-          id: s.id,
-          sku_code: s.sku_code,
-          sku_name: s.sku_name,
-          category: s.category?.category_name,
-          unit_of_measure: s.unit_of_measure
-        }))
+      const skuList = skus.map(s => ({
+        id: s.id,
+        sku_code: s.sku_code,
+        sku_name: s.sku_name,
+        category: s.category_name,
+        unit_of_measure: s.unit_of_measure
+      }))
 
-      // Step 4: Save inward session
-      setProcessingMessages(prev => [...prev, 'Saving processing session...'])
-      const session = await saveInwardSession({
-        vendorId: selectedVendor.id,
-        imageUrl: null, // We could upload to Supabase storage if needed
-        aiResponse: null,
-        extractedItems: null,
-        userId: user.id
-      })
-      setSessionId(session.id)
-
-      // Step 5: Send to Claude AI
       setProcessingMessages(prev => [...prev, 'Sending to Claude AI for analysis...'])
       const aiResult = await extractVendorInvoice(
         base64,
@@ -208,36 +258,30 @@ export default function NewInwardPage() {
       setProcessingMessages(prev => [...prev, 'Processing AI response...'])
       setAiResponse(aiResult)
 
-      // Step 6: Prepare extracted items for review
-      const itemsForReview = aiResult.line_items.map((item, index) => ({
+      const itemsForReview = (aiResult.line_items || []).map((item, index) => ({
         id: index + 1,
         vendor_item_name: item.vendor_item_name,
         matched_sku_id: item.matched_sku_id,
         matched_sku_name: item.matched_sku_name,
-        match_confidence: item.match_confidence,
-        match_method: item.match_method,
-        quantity_vendor_unit: item.quantity,
-        vendor_unit: item.unit,
-        quantity_internal: item.quantity, // Will be editable
-        internal_unit: 'PCS', // Will be editable
-        rate: item.rate,
-        amount: item.amount,
-        gst_rate: 18, // Default GST rate
-        conversion_factor: 1
+        match_confidence: item.match_confidence || 0,
+        match_method: item.match_method || 'none',
+        quantity_vendor_unit: item.quantity || 0,
+        vendor_unit: item.unit || 'PCS',
+        quantity_internal: item.quantity || 0,
+        rate: item.rate || 0,
+        amount: item.amount || 0,
+        gst_rate: 18
       }))
 
       setExtractedItems(itemsForReview)
-
-      // Update invoice info
       setInvoiceInfo({
         invoice_no: aiResult.invoice_no || '',
         invoice_date: aiResult.invoice_date || '',
         notes: ''
       })
 
-      setProcessingMessages(prev => [...prev, '✅ AI processing completed successfully!'])
+      setProcessingMessages(prev => [...prev, 'AI processing completed successfully!'])
 
-      // Auto-advance to review step after 1 second
       setTimeout(() => {
         setCurrentStep(STEPS.REVIEW_ITEMS)
       }, 1000)
@@ -245,31 +289,29 @@ export default function NewInwardPage() {
     } catch (error) {
       console.error('AI Processing failed:', error)
       toast.error(error.message || 'AI processing failed')
-      setProcessingMessages(prev => [...prev, `❌ Error: ${error.message}`])
+      setProcessingMessages(prev => [...prev, `Error: ${error.message}`])
     } finally {
       setIsProcessing(false)
     }
   }
 
+  // Item editing
   const updateExtractedItem = (index, field, value) => {
     setExtractedItems(prev => {
       const updated = [...prev]
       updated[index] = { ...updated[index], [field]: value }
 
-      // If SKU is changed, update related fields
       if (field === 'matched_sku_id') {
         const sku = skus.find(s => s.id === value)
         if (sku) {
           updated[index].matched_sku_name = sku.sku_name
-          updated[index].internal_unit = sku.unit_of_measure
           updated[index].match_confidence = 100
           updated[index].match_method = 'manual'
         }
       }
 
-      // Recalculate amount if quantity or rate changes
       if (field === 'quantity_vendor_unit' || field === 'rate') {
-        updated[index].amount = updated[index].quantity_vendor_unit * updated[index].rate
+        updated[index].amount = (updated[index].quantity_vendor_unit || 0) * (updated[index].rate || 0)
       }
 
       return updated
@@ -280,8 +322,8 @@ export default function NewInwardPage() {
     setExtractedItems(prev => prev.filter((_, i) => i !== index))
   }
 
+  // Confirm inward (Step 5)
   const handleConfirmInward = async () => {
-    // Validate that all items have matched SKUs
     const unmatched = extractedItems.filter(item => !item.matched_sku_id)
     if (unmatched.length > 0) {
       toast.error('Please assign SKUs to all items before confirming')
@@ -291,33 +333,27 @@ export default function NewInwardPage() {
     setIsConfirming(true)
 
     try {
-      // Prepare data for confirmation
       const inwardData = {
         vendorId: selectedVendor.id,
         items: extractedItems.map(item => ({
           sku_id: item.matched_sku_id,
           vendor_item_name: item.vendor_item_name,
-          quantity_vendor_unit: item.quantity_vendor_unit,
-          vendor_unit: item.vendor_unit,
-          quantity_internal: item.quantity_internal,
-          internal_unit: item.internal_unit,
+          quantity: item.quantity_internal || item.quantity_vendor_unit,
+          unit: item.vendor_unit,
           rate: item.rate,
-          gst_rate: item.gst_rate,
-          conversion_factor: item.conversion_factor
+          gst_rate: item.gst_rate
         })),
         invoiceNo: invoiceInfo.invoice_no,
         invoiceDate: invoiceInfo.invoice_date,
         notes: invoiceInfo.notes,
-        sessionId: sessionId,
-        userId: user.id
+        userId: user?.id
       }
 
-      // Confirm inward
       const result = await confirmInward(inwardData)
 
       // Check for aliases to save
       const newAliases = extractedItems
-        .filter(item => item.match_method !== 'alias' && item.match_confidence >= 50)
+        .filter(item => item.match_method !== 'alias' && item.matched_sku_id)
         .map(item => ({
           vendor_id: selectedVendor.id,
           vendor_item_name: item.vendor_item_name,
@@ -327,11 +363,14 @@ export default function NewInwardPage() {
 
       if (newAliases.length > 0) {
         setAliasesToSave(newAliases)
+        const checked = {}
+        newAliases.forEach((_, i) => { checked[i] = true })
+        setAliasChecked(checked)
+        toast.success(`Inward confirmed! Reference: ${result.inwardNumber}`)
         setCurrentStep(STEPS.SAVE_ALIASES)
       } else {
-        // No aliases to save, go directly to success
-        toast.success(`Inward confirmed successfully! Reference: ${result.referenceNo}`)
-        navigate('/inward/list')
+        toast.success(`Inward confirmed! Reference: ${result.inwardNumber}`)
+        navigate('/inward')
       }
 
     } catch (error) {
@@ -342,22 +381,48 @@ export default function NewInwardPage() {
     }
   }
 
-  const canProceed = () => {
-    switch (currentStep) {
-      case STEPS.SELECT_VENDOR:
-        return selectedVendor
-      case STEPS.UPLOAD_INVOICE:
-        return uploadedFile
-      case STEPS.AI_PROCESSING:
-        return aiResponse && extractedItems.length > 0
-      case STEPS.REVIEW_ITEMS:
-        return extractedItems.every(item => item.matched_sku_id)
-      default:
-        return false
+  // Save aliases
+  const handleSaveAliases = async () => {
+    const selectedAliases = aliasesToSave.filter((_, i) => aliasChecked[i])
+
+    if (selectedAliases.length > 0) {
+      try {
+        const { error } = await supabase
+          .from('vendor_sku_aliases')
+          .insert(selectedAliases.map(a => ({
+            vendor_id: a.vendor_id,
+            vendor_item_name: a.vendor_item_name,
+            sku_id: a.sku_id
+          })))
+
+        if (error) throw error
+        toast.success(`${selectedAliases.length} alias(es) saved`)
+      } catch (error) {
+        console.error('Failed to save aliases:', error)
+        toast.error('Failed to save aliases: ' + error.message)
+      }
     }
+
+    navigate('/inward')
   }
 
-  const totalAmount = extractedItems.reduce((sum, item) => sum + item.amount, 0)
+  const totalAmount = extractedItems.reduce((sum, item) => sum + (item.amount || 0), 0)
+
+  const handleNextStep = () => {
+    if (currentStep === STEPS.SELECT_VENDOR && !selectedVendor) {
+      toast.error('Please select a vendor')
+      return
+    }
+    if (currentStep === STEPS.UPLOAD_INVOICE && !uploadedFile) {
+      toast.error('Please upload an invoice')
+      return
+    }
+    setCurrentStep(prev => prev + 1)
+  }
+
+  const handlePrevStep = () => {
+    setCurrentStep(prev => prev - 1)
+  }
 
   return (
     <div>
@@ -366,70 +431,9 @@ export default function NewInwardPage() {
         description="Upload vendor invoice and let AI extract and match items to your catalogue"
       />
 
-      {/* Progress Steps */}
-      <Card className="mb-6">
-        <CardContent className="py-4">
-          {/* Desktop Progress Steps */}
-          <div className="hidden md:flex items-center justify-between">
-            {Object.entries(STEP_NAMES).map(([step, name]) => {
-              const stepNum = parseInt(step)
-              const isActive = stepNum === currentStep
-              const isCompleted = stepNum < currentStep
+      <StepIndicator currentStep={currentStep} />
 
-              return (
-                <div key={step} className="flex items-center">
-                  <div className={`
-                    flex items-center justify-center w-8 h-8 rounded-full border-2 text-sm font-semibold
-                    ${isCompleted ? 'bg-green-500 border-green-500 text-white' :
-                      isActive ? 'bg-blue-500 border-blue-500 text-white' :
-                      'border-gray-300 text-gray-400'}
-                  `}>
-                    {isCompleted ? <CheckCircle className="h-4 w-4" /> : stepNum}
-                  </div>
-                  <span className={`ml-2 text-sm ${isActive ? 'font-semibold' : 'text-gray-500'}`}>
-                    {name}
-                  </span>
-                  {stepNum < Object.keys(STEP_NAMES).length && (
-                    <ChevronRight className="h-4 w-4 mx-4 text-gray-400" />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-
-          {/* Mobile Progress Steps */}
-          <div className="md:hidden">
-            <div className="flex items-center justify-center mb-4">
-              <span className="text-sm font-medium text-gray-600">
-                Step {currentStep} of {Object.keys(STEP_NAMES).length}
-              </span>
-            </div>
-            <div className="flex items-center justify-center">
-              <div className={`
-                flex items-center justify-center w-10 h-10 rounded-full border-2 text-sm font-semibold mr-3
-                bg-blue-500 border-blue-500 text-white
-              `}>
-                {currentStep}
-              </div>
-              <div>
-                <div className="font-semibold text-gray-900">{STEP_NAMES[currentStep]}</div>
-                <div className="text-sm text-gray-500">Current Step</div>
-              </div>
-            </div>
-            {/* Progress Bar */}
-            <div className="mt-4">
-              <div className="bg-gray-200 rounded-full h-2">
-                <div
-                  className="bg-blue-500 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${(currentStep / Object.keys(STEP_NAMES).length) * 100}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Step Content */}
+      {/* Step 1: Select Vendor */}
       {currentStep === STEPS.SELECT_VENDOR && (
         <Card>
           <CardHeader>
@@ -444,8 +448,11 @@ export default function NewInwardPage() {
                 label="Vendor"
                 placeholder="Search and select a vendor..."
                 options={vendorOptions}
-                value={vendorOptions.find(option => option.value === selectedVendor?.id)}
-                onChange={handleVendorSelect}
+                value={vendorOptions.find(o => o.value === selectedVendor?.id) || null}
+                onChange={(selected) => {
+                  const vendor = vendors.find(v => v.id === selected?.value)
+                  setSelectedVendor(vendor || null)
+                }}
                 isLoading={vendorsLoading}
               />
 
@@ -464,6 +471,7 @@ export default function NewInwardPage() {
         </Card>
       )}
 
+      {/* Step 2: Upload Invoice */}
       {currentStep === STEPS.UPLOAD_INVOICE && (
         <Card>
           <CardHeader>
@@ -474,36 +482,58 @@ export default function NewInwardPage() {
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
-                <Upload className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-                <p className="text-lg font-medium text-gray-900 mb-2">
-                  Drop your invoice here or click to browse
+              <div
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                className="border-2 border-dashed border-gray-300 rounded-lg p-6 sm:p-8 text-center hover:border-blue-400 transition-colors"
+              >
+                <Upload className="h-10 w-10 sm:h-12 sm:w-12 mx-auto text-gray-400 mb-3 sm:mb-4" />
+                <p className="text-base sm:text-lg font-medium text-gray-900 mb-2">
+                  Upload or capture your invoice
                 </p>
                 <p className="text-sm text-gray-500 mb-4">
-                  Supports JPG, PNG, PDF up to 10MB
+                  Supports JPG, PNG, WebP up to 10MB
                 </p>
                 <input
                   type="file"
-                  accept="image/jpeg,image/jpg,image/png,application/pdf"
+                  accept="image/jpeg,image/jpg,image/png,image/webp"
                   onChange={handleFileUpload}
                   className="hidden"
                   id="invoice-upload"
                 />
-                <label
-                  htmlFor="invoice-upload"
-                  className="inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-primary-600 border border-transparent rounded-lg cursor-pointer hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-colors"
-                >
-                  Browse Files
-                </label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFileUpload}
+                  className="hidden"
+                  id="invoice-camera"
+                />
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <label
+                    htmlFor="invoice-upload"
+                    className="inline-flex items-center px-4 py-2.5 text-sm font-medium text-white bg-navy-700 rounded-lg cursor-pointer hover:bg-blue-700 transition-colors w-full sm:w-auto justify-center"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    Browse Files
+                  </label>
+                  <label
+                    htmlFor="invoice-camera"
+                    className="inline-flex items-center px-4 py-2.5 text-sm font-medium text-navy-600 bg-blue-50 border border-blue-200 rounded-lg cursor-pointer hover:bg-blue-100 transition-colors w-full sm:w-auto justify-center"
+                  >
+                    <Camera className="h-4 w-4 mr-2" />
+                    Take Photo
+                  </label>
+                </div>
               </div>
 
               {uploadedFile && (
                 <div className="p-4 bg-green-50 rounded-lg border border-green-200">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center">
-                      <FileText className="h-5 w-5 text-green-600 mr-2" />
-                      <div>
-                        <p className="font-medium text-green-900">{uploadedFile.name}</p>
+                    <div className="flex items-center min-w-0">
+                      <FileText className="h-5 w-5 text-green-600 mr-2 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="font-medium text-green-900 truncate">{uploadedFile.name}</p>
                         <p className="text-sm text-green-600">
                           {(uploadedFile.size / 1024 / 1024).toFixed(1)} MB
                         </p>
@@ -512,10 +542,7 @@ export default function NewInwardPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => {
-                        setUploadedFile(null)
-                        setFilePreview(null)
-                      }}
+                      onClick={() => { setUploadedFile(null); setFilePreview(null) }}
                     >
                       <X className="h-4 w-4" />
                     </Button>
@@ -523,13 +550,13 @@ export default function NewInwardPage() {
                 </div>
               )}
 
-              {filePreview && filePreview !== 'pdf' && (
+              {filePreview && (
                 <div className="mt-4">
                   <p className="text-sm font-medium text-gray-700 mb-2">Preview:</p>
                   <img
                     src={filePreview}
                     alt="Invoice preview"
-                    className="max-w-full h-64 object-contain border rounded-lg"
+                    className="max-w-full max-h-64 object-contain border rounded-lg mx-auto"
                   />
                 </div>
               )}
@@ -538,6 +565,7 @@ export default function NewInwardPage() {
         </Card>
       )}
 
+      {/* Step 3: AI Processing */}
       {currentStep === STEPS.AI_PROCESSING && (
         <Card>
           <CardHeader>
@@ -547,78 +575,65 @@ export default function NewInwardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {isProcessing ? (
-                <div className="text-center py-8">
-                  <Spinner size="lg" className="mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                    Processing Invoice...
-                  </h3>
-                  <p className="text-gray-600 mb-6">
-                    Claude AI is analyzing your invoice and matching items to your catalogue
-                  </p>
-
-                  <div className="max-w-md mx-auto text-left">
-                    {processingMessages.map((message, index) => (
-                      <div key={index} className="flex items-center mb-2">
-                        <div className={`w-2 h-2 rounded-full mr-3 ${
-                          message.includes('✅') ? 'bg-green-500' :
-                          message.includes('❌') ? 'bg-red-500' : 'bg-blue-500'
-                        }`} />
-                        <span className="text-sm text-gray-700">{message}</span>
-                      </div>
-                    ))}
+            {isProcessing ? (
+              <div className="text-center py-8">
+                <Spinner size="lg" className="mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Processing Invoice...</h3>
+                <p className="text-gray-600 mb-6">
+                  Claude AI is analyzing your invoice and matching items to your catalogue
+                </p>
+                <div className="max-w-md mx-auto text-left">
+                  {processingMessages.map((message, index) => (
+                    <div key={index} className="flex items-center mb-2">
+                      <div className={`w-2 h-2 rounded-full mr-3 ${
+                        message.includes('Error') ? 'bg-red-500' :
+                        message.includes('completed') ? 'bg-green-500' : 'bg-blue-500'
+                      }`} />
+                      <span className="text-sm text-gray-700">{message}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : aiResponse ? (
+              <div className="text-center py-8">
+                <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-green-900 mb-2">Processing Complete!</h3>
+                <p className="text-gray-600 mb-4">Found {extractedItems.length} items in the invoice</p>
+                <div className="grid grid-cols-3 gap-4 max-w-md mx-auto">
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-green-600">
+                      {extractedItems.filter(i => i.match_confidence >= 80).length}
+                    </div>
+                    <div className="text-xs text-gray-500">High Confidence</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-yellow-600">
+                      {extractedItems.filter(i => i.match_confidence >= 50 && i.match_confidence < 80).length}
+                    </div>
+                    <div className="text-xs text-gray-500">Medium</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-red-600">
+                      {extractedItems.filter(i => i.match_confidence < 50).length}
+                    </div>
+                    <div className="text-xs text-gray-500">Needs Review</div>
                   </div>
                 </div>
-              ) : aiResponse ? (
-                <div className="text-center py-8">
-                  <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-green-900 mb-2">
-                    Processing Complete!
-                  </h3>
-                  <p className="text-gray-600 mb-4">
-                    Found {extractedItems.length} items in the invoice
-                  </p>
-                  <div className="grid grid-cols-3 gap-4 max-w-md mx-auto">
-                    <div className="text-center">
-                      <div className="text-2xl font-bold text-blue-600">
-                        {extractedItems.filter(item => item.match_confidence >= 80).length}
-                      </div>
-                      <div className="text-xs text-gray-500">High Confidence</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-2xl font-bold text-yellow-600">
-                        {extractedItems.filter(item => item.match_confidence >= 50 && item.match_confidence < 80).length}
-                      </div>
-                      <div className="text-xs text-gray-500">Medium Confidence</div>
-                    </div>
-                    <div className="text-center">
-                      <div className="text-2xl font-bold text-red-600">
-                        {extractedItems.filter(item => item.match_confidence < 50).length}
-                      </div>
-                      <div className="text-xs text-gray-500">Needs Review</div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <Brain className="h-16 w-16 text-blue-500 mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-gray-900 mb-2">
-                    Ready to Process
-                  </h3>
-                  <p className="text-gray-600 mb-4">
-                    Click "Process with AI" to analyze the uploaded invoice
-                  </p>
-                </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <Brain className="h-16 w-16 text-blue-500 mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-gray-900 mb-2">Ready to Process</h3>
+                <p className="text-gray-600 mb-4">Click &quot;Process with AI&quot; to analyze the uploaded invoice</p>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
 
+      {/* Step 4: Review Items */}
       {currentStep === STEPS.REVIEW_ITEMS && (
         <div className="space-y-6">
-          {/* Invoice Info */}
           <Card>
             <CardHeader>
               <CardTitle>Invoice Information</CardTitle>
@@ -645,10 +660,9 @@ export default function NewInwardPage() {
             </CardContent>
           </Card>
 
-          {/* Items Table */}
           <Card>
             <CardHeader>
-              <CardTitle>Review & Edit Items</CardTitle>
+              <CardTitle>Review &amp; Edit Items</CardTitle>
               <p className="text-sm text-gray-600">
                 Review AI matches and edit as needed. All items must have a matched SKU.
               </p>
@@ -666,74 +680,71 @@ export default function NewInwardPage() {
                       <TableHeader>Qty (Vendor)</TableHeader>
                       <TableHeader>Unit</TableHeader>
                       <TableHeader>Qty (Internal)</TableHeader>
-                      <TableHeader>Rate (₹)</TableHeader>
-                      <TableHeader>Amount (₹)</TableHeader>
-                      <TableHeader>Actions</TableHeader>
+                      <TableHeader>Rate</TableHeader>
+                      <TableHeader>Total</TableHeader>
+                      <TableHeader></TableHeader>
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {extractedItems.map((item, index) => (
                       <TableRow key={item.id}>
                         <TableCell>{index + 1}</TableCell>
-                        <TableCell className="font-medium">{item.vendor_item_name}</TableCell>
-                        <TableCell>
+                        <TableCell className="font-medium text-sm">{item.vendor_item_name}</TableCell>
+                        <TableCell className="min-w-[250px]">
                           <Select
                             options={skuOptions}
-                            value={skuOptions.find(opt => opt.value === item.matched_sku_id)}
+                            value={skuOptions.find(o => o.value === item.matched_sku_id) || null}
                             onChange={(selected) => updateExtractedItem(index, 'matched_sku_id', selected?.value)}
                             placeholder="Select SKU..."
-                            className="min-w-64"
                           />
                         </TableCell>
                         <TableCell>
                           <ConfidenceBadge confidence={item.match_confidence} />
                         </TableCell>
                         <TableCell>
-                          <Input
+                          <input
                             type="number"
                             step="0.01"
                             value={item.quantity_vendor_unit}
                             onChange={(e) => updateExtractedItem(index, 'quantity_vendor_unit', parseFloat(e.target.value) || 0)}
-                            className="w-20"
+                            className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
                           />
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="min-w-[100px]">
                           <Select
-                            options={units}
-                            value={units.find(u => u.value === item.vendor_unit)}
+                            options={UNIT_OPTIONS}
+                            value={UNIT_OPTIONS.find(u => u.value === item.vendor_unit) || null}
                             onChange={(selected) => updateExtractedItem(index, 'vendor_unit', selected?.value)}
-                            className="w-24"
                           />
                         </TableCell>
                         <TableCell>
-                          <Input
+                          <input
                             type="number"
                             step="0.01"
                             value={item.quantity_internal}
                             onChange={(e) => updateExtractedItem(index, 'quantity_internal', parseFloat(e.target.value) || 0)}
-                            className="w-20"
+                            className="w-20 px-2 py-1 border border-gray-300 rounded text-sm"
                           />
                         </TableCell>
                         <TableCell>
-                          <Input
+                          <input
                             type="number"
                             step="0.01"
                             value={item.rate}
                             onChange={(e) => updateExtractedItem(index, 'rate', parseFloat(e.target.value) || 0)}
-                            className="w-24"
+                            className="w-24 px-2 py-1 border border-gray-300 rounded text-sm"
                           />
                         </TableCell>
                         <TableCell className="font-medium">
-                          ₹{item.amount.toFixed(2)}
+                          {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(item.amount)}
                         </TableCell>
                         <TableCell>
-                          <Button
-                            variant="outline"
-                            size="sm"
+                          <button
                             onClick={() => removeExtractedItem(index)}
+                            className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50 rounded"
                           >
-                            <X className="h-4 w-4" />
-                          </Button>
+                            <Trash2 className="h-4 w-4" />
+                          </button>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -742,98 +753,55 @@ export default function NewInwardPage() {
               </div>
 
               {/* Mobile Cards */}
-              <div className="lg:hidden space-y-4">
+              <div className="lg:hidden space-y-3">
                 {extractedItems.map((item, index) => (
-                  <div key={item.id} className="border border-gray-200 rounded-lg p-4">
+                  <div key={item.id} className={`rounded-xl p-4 border ${index % 2 === 0 ? 'bg-white border-gray-200' : 'bg-blue-50/40 border-blue-100'}`}>
                     <div className="flex justify-between items-start mb-3">
                       <div className="flex-1">
-                        <div className="font-medium text-gray-900 mb-1">
-                          Item #{index + 1}
-                        </div>
-                        <div className="text-sm font-medium text-gray-800">
-                          {item.vendor_item_name}
-                        </div>
+                        <div className="font-medium text-sm">Item #{index + 1}</div>
+                        <div className="text-sm text-gray-800">{item.vendor_item_name}</div>
                       </div>
-                      <div className="flex items-center space-x-2">
+                      <div className="flex items-center gap-2">
                         <ConfidenceBadge confidence={item.match_confidence} />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => removeExtractedItem(index)}
-                        >
+                        <button onClick={() => removeExtractedItem(index)} className="p-1 text-red-500">
                           <X className="h-4 w-4" />
-                        </Button>
+                        </button>
                       </div>
                     </div>
-
                     <div className="space-y-3">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Matched SKU
-                        </label>
-                        <Select
-                          options={skuOptions}
-                          value={skuOptions.find(opt => opt.value === item.matched_sku_id)}
-                          onChange={(selected) => updateExtractedItem(index, 'matched_sku_id', selected?.value)}
-                          placeholder="Select SKU..."
+                      <Select
+                        label="Matched SKU"
+                        options={skuOptions}
+                        value={skuOptions.find(o => o.value === item.matched_sku_id) || null}
+                        onChange={(selected) => updateExtractedItem(index, 'matched_sku_id', selected?.value)}
+                        placeholder="Select SKU..."
+                      />
+                      <div className="grid grid-cols-2 gap-3">
+                        <Input
+                          label="Qty (Vendor)"
+                          type="number"
+                          step="0.01"
+                          value={item.quantity_vendor_unit}
+                          onChange={(e) => updateExtractedItem(index, 'quantity_vendor_unit', parseFloat(e.target.value) || 0)}
+                        />
+                        <Input
+                          label="Qty (Internal)"
+                          type="number"
+                          step="0.01"
+                          value={item.quantity_internal}
+                          onChange={(e) => updateExtractedItem(index, 'quantity_internal', parseFloat(e.target.value) || 0)}
                         />
                       </div>
-
                       <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Qty (Vendor)
-                          </label>
-                          <Input
-                            type="number"
-                            step="0.01"
-                            value={item.quantity_vendor_unit}
-                            onChange={(e) => updateExtractedItem(index, 'quantity_vendor_unit', parseFloat(e.target.value) || 0)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Vendor Unit
-                          </label>
-                          <Select
-                            options={units}
-                            value={units.find(u => u.value === item.vendor_unit)}
-                            onChange={(selected) => updateExtractedItem(index, 'vendor_unit', selected?.value)}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Qty (Internal)
-                          </label>
-                          <Input
-                            type="number"
-                            step="0.01"
-                            value={item.quantity_internal}
-                            onChange={(e) => updateExtractedItem(index, 'quantity_internal', parseFloat(e.target.value) || 0)}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Rate (₹)
-                          </label>
-                          <Input
-                            type="number"
-                            step="0.01"
-                            value={item.rate}
-                            onChange={(e) => updateExtractedItem(index, 'rate', parseFloat(e.target.value) || 0)}
-                          />
-                        </div>
-                      </div>
-
-                      <div className="pt-2 border-t border-gray-200">
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm font-medium text-gray-700">Amount:</span>
-                          <span className="text-lg font-semibold text-gray-900">
-                            ₹{item.amount.toFixed(2)}
-                          </span>
+                        <Input
+                          label="Rate"
+                          type="number"
+                          step="0.01"
+                          value={item.rate}
+                          onChange={(e) => updateExtractedItem(index, 'rate', parseFloat(e.target.value) || 0)}
+                        />
+                        <div className="pt-6 text-right font-semibold">
+                          {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(item.amount)}
                         </div>
                       </div>
                     </div>
@@ -842,16 +810,12 @@ export default function NewInwardPage() {
               </div>
 
               {extractedItems.length > 0 && (
-                <div className="mt-4 pt-4 border-t">
-                  <div className="flex justify-end">
-                    <div className="text-right">
-                      <div className="text-lg font-semibold">
-                        Total Amount: ₹{totalAmount.toFixed(2)}
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        {extractedItems.length} items
-                      </div>
+                <div className="mt-4 pt-4 border-t flex justify-end">
+                  <div className="text-right">
+                    <div className="text-lg font-semibold">
+                      Total: {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(totalAmount)}
                     </div>
+                    <div className="text-sm text-gray-600">{extractedItems.length} items</div>
                   </div>
                 </div>
               )}
@@ -860,6 +824,50 @@ export default function NewInwardPage() {
         </div>
       )}
 
+      {/* Step 5: Confirm */}
+      {currentStep === STEPS.CONFIRM && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <CheckCircle className="h-5 w-5 mr-2" />
+              Confirm Inward
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h3 className="font-semibold mb-2">Summary</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-500">Vendor:</span>
+                    <p className="font-medium">{selectedVendor?.vendor_name}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Invoice No:</span>
+                    <p className="font-medium">{invoiceInfo.invoice_no || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Items:</span>
+                    <p className="font-medium">{extractedItems.length}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Total Amount:</span>
+                    <p className="font-medium text-lg">
+                      {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(totalAmount)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-sm text-gray-600">
+                Confirming will create an inward transaction and update inventory quantities for all items.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Step 6: Save Aliases */}
       {currentStep === STEPS.SAVE_ALIASES && aliasesToSave.length > 0 && (
         <Card>
           <CardHeader>
@@ -877,12 +885,13 @@ export default function NewInwardPage() {
                 <div key={index} className="flex items-center justify-between p-3 border rounded-lg">
                   <div>
                     <div className="font-medium">{alias.vendor_item_name}</div>
-                    <div className="text-sm text-gray-600">→ {alias.sku_name}</div>
+                    <div className="text-sm text-gray-600">{alias.sku_name}</div>
                   </div>
                   <input
                     type="checkbox"
-                    defaultChecked
-                    className="h-4 w-4 text-blue-600"
+                    checked={aliasChecked[index] !== false}
+                    onChange={(e) => setAliasChecked(prev => ({ ...prev, [index]: e.target.checked }))}
+                    className="h-4 w-4 text-navy-600"
                   />
                 </div>
               ))}
@@ -892,10 +901,10 @@ export default function NewInwardPage() {
       )}
 
       {/* Navigation Buttons */}
-      <div className="mt-6 flex flex-col sm:flex-row justify-between gap-3 sm:gap-0">
+      <div className="mt-6 flex flex-col sm:flex-row justify-between gap-3">
         <Button
           variant="outline"
-          onClick={currentStep > 1 ? handlePrevStep : () => navigate('/inward/list')}
+          onClick={currentStep > 1 ? handlePrevStep : () => navigate('/inward')}
           disabled={isProcessing || isConfirming}
           className="order-2 sm:order-1 w-full sm:w-auto"
         >
@@ -903,28 +912,44 @@ export default function NewInwardPage() {
           {currentStep > 1 ? 'Previous' : 'Cancel'}
         </Button>
 
-        {currentStep < STEPS.SAVE_ALIASES ? (
+        {currentStep === STEPS.SAVE_ALIASES ? (
           <Button
-            onClick={currentStep === STEPS.AI_PROCESSING ? handleAIProcessing :
-                     currentStep === STEPS.REVIEW_ITEMS ? handleConfirmInward : handleNextStep}
-            disabled={!canProceed() || isProcessing || isConfirming}
-            loading={isProcessing || isConfirming}
+            onClick={handleSaveAliases}
             className="order-1 sm:order-2 w-full sm:w-auto"
           >
-            {currentStep === STEPS.AI_PROCESSING ? 'Process with AI' :
-             currentStep === STEPS.REVIEW_ITEMS ? 'Confirm Inward' : 'Next'}
-            <ChevronRight className="h-4 w-4 ml-2" />
+            <Save className="h-4 w-4 mr-2" />
+            Save Aliases & Complete
+          </Button>
+        ) : currentStep === STEPS.CONFIRM ? (
+          <Button
+            onClick={handleConfirmInward}
+            disabled={isConfirming}
+            className="order-1 sm:order-2 w-full sm:w-auto"
+          >
+            {isConfirming ? <Spinner size="sm" className="mr-2" /> : <CheckCircle className="h-4 w-4 mr-2" />}
+            Confirm Inward
+          </Button>
+        ) : currentStep === STEPS.AI_PROCESSING ? (
+          <Button
+            onClick={aiResponse ? handleNextStep : handleAIProcessing}
+            disabled={isProcessing}
+            className="order-1 sm:order-2 w-full sm:w-auto"
+          >
+            {isProcessing ? <Spinner size="sm" className="mr-2" /> : <Brain className="h-4 w-4 mr-2" />}
+            {aiResponse ? 'Next' : 'Process with AI'}
           </Button>
         ) : (
           <Button
-            onClick={() => {
-              toast.success('Inward completed successfully!')
-              navigate('/inward/list')
-            }}
+            onClick={handleNextStep}
+            disabled={
+              (currentStep === STEPS.SELECT_VENDOR && !selectedVendor) ||
+              (currentStep === STEPS.UPLOAD_INVOICE && !uploadedFile) ||
+              (currentStep === STEPS.REVIEW_ITEMS && extractedItems.some(i => !i.matched_sku_id))
+            }
             className="order-1 sm:order-2 w-full sm:w-auto"
           >
-            <CheckCircle className="h-4 w-4 mr-2" />
-            Complete
+            Next
+            <ChevronRight className="h-4 w-4 ml-2" />
           </Button>
         )}
       </div>

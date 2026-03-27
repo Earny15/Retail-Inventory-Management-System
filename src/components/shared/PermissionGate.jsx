@@ -1,25 +1,10 @@
-import { usePermissions } from '../../hooks/usePermissions.jsx'
+import { useAuth } from '../../hooks/useAuth'
 
-export function PermissionGate({
-  module,
-  action,
-  children,
-  fallback = null,
-  showDisabled = false
-}) {
-  const { checkPermission } = usePermissions()
+export default function PermissionGate({ module, action = 'view', children, fallback = null }) {
+  const { hasPermission } = useAuth()
 
-  const hasAccess = checkPermission(module, action)
-
-  if (!hasAccess) {
-    if (showDisabled && typeof children === 'function') {
-      return children({ disabled: true })
-    }
+  if (!hasPermission(module, action)) {
     return fallback
-  }
-
-  if (typeof children === 'function') {
-    return children({ disabled: false })
   }
 
   return children

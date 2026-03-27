@@ -13,11 +13,11 @@ const Button = forwardRef(({
   const baseClasses = 'inline-flex items-center justify-center font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed'
 
   const variants = {
-    primary: 'bg-primary-600 hover:bg-primary-700 text-white focus:ring-primary-500',
-    secondary: 'bg-gray-200 hover:bg-gray-300 text-gray-800 focus:ring-gray-500',
-    outline: 'border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 focus:ring-primary-500',
-    danger: 'bg-red-600 hover:bg-red-700 text-white focus:ring-red-500',
-    ghost: 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+    primary: 'bg-primary-600 hover:bg-primary-700 text-white focus:ring-primary-400 shadow-sm',
+    secondary: 'bg-navy-100 hover:bg-navy-200 text-navy-700 focus:ring-navy-300',
+    outline: 'border border-gray-300 bg-white hover:bg-gray-50 text-navy-700 focus:ring-primary-400',
+    danger: 'bg-red-600 hover:bg-red-700 text-white focus:ring-red-500 shadow-sm',
+    ghost: 'text-navy-600 hover:bg-navy-50 hover:text-navy-800'
   }
 
   const sizes = {

@@ -9,8 +9,31 @@ const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages'
  * Extract vendor invoice data using Claude AI
  */
 export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendorAliases = []) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key is not configured. Set VITE_ANTHROPIC_API_KEY in .env')
+  }
+
+  // Only image types are supported for vision - PDF must be converted first
+  const supportedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  if (!supportedTypes.includes(mimeType)) {
+    throw new Error(`Unsupported file type: ${mimeType}. Please upload a JPG, PNG, or WebP image.`)
+  }
+
   try {
-    console.log('🤖 Sending invoice to Claude AI for processing...')
+    console.log('Sending invoice to Claude AI for processing...')
+
+    // Keep SKU list concise to avoid token limits
+    const skuListCompact = skuList.map(s => ({
+      id: s.id,
+      code: s.sku_code,
+      name: s.sku_name,
+      uom: s.unit_of_measure
+    }))
+
+    const aliasesCompact = vendorAliases.map(a => ({
+      vendor_item: a.vendor_item_name,
+      sku_id: a.sku_id
+    }))
 
     const response = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
@@ -21,7 +44,7 @@ export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendo
         'anthropic-dangerous-direct-browser-access': 'true'
       },
       body: JSON.stringify({
-        model: 'claude-3-opus-20240229',
+        model: 'claude-sonnet-4-6-20250620',
         max_tokens: 4096,
         messages: [{
           role: 'user',
@@ -41,10 +64,10 @@ export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendo
 Extract all line items from this vendor invoice and match them to the internal SKU catalogue.
 
 INTERNAL SKU CATALOGUE:
-${JSON.stringify(skuList, null, 2)}
+${JSON.stringify(skuListCompact)}
 
 VENDOR-SPECIFIC ALIASES (use these first for matching):
-${JSON.stringify(vendorAliases, null, 2)}
+${JSON.stringify(aliasesCompact)}
 
 Extract and return a JSON object with this exact structure (return ONLY valid JSON, no markdown):
 {
@@ -71,7 +94,7 @@ Extract and return a JSON object with this exact structure (return ONLY valid JS
 
 Matching rules:
 1. First check vendor aliases - if vendor_item_name matches an alias exactly, use that SKU (confidence: 100, method: "alias")
-2. Otherwise use semantic similarity - aluminium product names, sizes, types (e.g. "Anodized Section 6063" → "Aluminium Section T6")
+2. Otherwise use semantic similarity - aluminium product names, sizes, types
 3. Set confidence 80-100 for good matches, 50-79 for uncertain, below 50 for no match
 4. If no match found, set matched_sku_id to null and confidence to 0`
             }
@@ -81,7 +104,14 @@ Matching rules:
     })
 
     if (!response.ok) {
-      throw new Error(`Anthropic API error: ${response.status} ${response.statusText}`)
+      const errorBody = await response.text()
+      console.error('Anthropic API error body:', errorBody)
+      let errorMsg = `Anthropic API error: ${response.status}`
+      try {
+        const errJson = JSON.parse(errorBody)
+        errorMsg = errJson.error?.message || errorMsg
+      } catch {}
+      throw new Error(errorMsg)
     }
 
     const data = await response.json()
@@ -91,11 +121,11 @@ Matching rules:
     const cleanText = text.replace(/```json|```/g, '').trim()
     const result = JSON.parse(cleanText)
 
-    console.log('✅ Claude AI processing completed:', result)
+    console.log('Claude AI processing completed:', result)
     return result
 
   } catch (error) {
-    console.error('❌ Anthropic API error:', error)
+    console.error('Anthropic API error:', error)
     throw new Error(`AI processing failed: ${error.message}`)
   }
 }

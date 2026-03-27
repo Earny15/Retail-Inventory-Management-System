@@ -1,265 +1,238 @@
-import React, { useState } from 'react'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { z } from 'zod'
-import { useInventory } from '../../hooks/useInventory.jsx'
-import { usePermissions } from '../../hooks/usePermissions.jsx'
-import { PermissionGate } from '../../components/shared/PermissionGate'
+import React, { useState, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { supabase } from '../../services/supabase'
+import { useAuth } from '../../hooks/useAuth'
+import PermissionGate from '../../components/shared/PermissionGate'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
 import Input from '../../components/ui/Input'
 import Select from '../../components/ui/Select'
 import { Badge } from '../../components/ui/Badge'
-import { Modal } from '../../components/ui/Modal'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '../../components/ui/Table'
 import { Spinner } from '../../components/ui/Spinner'
+import { formatCurrency } from '../../utils/gstCalculator'
+import { Modal } from '../../components/ui/Modal'
+import { generateInventoryReportPDF, generateInventoryReportCSV } from '../../utils/reportGenerator'
+import toast from 'react-hot-toast'
 import {
   Package,
   Search,
-  Edit3,
-  AlertTriangle,
-  TrendingUp,
-  TrendingDown,
-  BarChart3,
-  IndianRupee,
-  History,
-  Settings,
-  Plus,
-  Minus
+  X,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Clock,
+  RefreshCw,
+  FileDown
 } from 'lucide-react'
 
-const stockAdjustmentSchema = z.object({
-  newStock: z.number().min(0, 'Stock cannot be negative'),
-  reason: z.string().min(1, 'Reason is required'),
-  notes: z.string().optional()
-})
-
-const reorderLevelSchema = z.object({
-  reorderLevel: z.number().min(0, 'Reorder level cannot be negative'),
-  minStockLevel: z.number().min(0, 'Minimum stock level cannot be negative'),
-  maxStockLevel: z.number().min(0, 'Maximum stock level cannot be negative')
-})
-
-function StockAdjustmentForm({ inventory, onClose, onSubmit, isLoading }) {
-  const {
-    register,
-    handleSubmit,
-    formState: { errors }
-  } = useForm({
-    resolver: zodResolver(stockAdjustmentSchema),
-    defaultValues: {
-      newStock: inventory?.current_stock || 0,
-      reason: '',
-      notes: ''
-    }
-  })
-
-  const reasonOptions = [
-    { value: 'Damage', label: 'Damaged Stock' },
-    { value: 'Theft', label: 'Theft/Loss' },
-    { value: 'Count Adjustment', label: 'Physical Count Adjustment' },
-    { value: 'Quality Issue', label: 'Quality Issue' },
-    { value: 'Return', label: 'Customer Return' },
-    { value: 'Other', label: 'Other' }
-  ]
-
-  return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-      <div className="bg-gray-50 p-4 rounded-lg">
-        <div className="flex items-center justify-between">
-          <div>
-            <h4 className="font-medium">{inventory?.sku?.sku_code} - {inventory?.sku?.sku_name}</h4>
-            <p className="text-sm text-gray-600">Company: {inventory?.company?.company_name}</p>
-          </div>
-          <div className="text-right">
-            <p className="text-sm text-gray-500">Current Stock</p>
-            <p className="text-2xl font-bold text-gray-900">{inventory?.current_stock}</p>
-          </div>
-        </div>
-      </div>
-
-      <Input
-        label="New Stock Level"
-        type="number"
-        step="0.01"
-        required
-        {...register('newStock', { valueAsNumber: true })}
-        error={errors.newStock?.message}
-      />
-
-      <Select
-        label="Reason"
-        required
-        options={reasonOptions}
-        placeholder="Select reason for adjustment..."
-        {...register('reason')}
-        error={errors.reason?.message}
-      />
-
-      <Input
-        label="Notes"
-        placeholder="Additional notes about this adjustment"
-        {...register('notes')}
-        error={errors.notes?.message}
-      />
-
-      <div className="flex justify-end space-x-3 pt-4 border-t">
-        <Button variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button type="submit" loading={isLoading}>
-          Update Stock
-        </Button>
-      </div>
-    </form>
-  )
-}
-
-function ReorderLevelForm({ inventory, onClose, onSubmit, isLoading }) {
-  const {
-    register,
-    handleSubmit,
-    formState: { errors }
-  } = useForm({
-    resolver: zodResolver(reorderLevelSchema),
-    defaultValues: {
-      reorderLevel: inventory?.sku?.reorder_level || 0,
-      minStockLevel: inventory?.sku?.min_stock_level || 0,
-      maxStockLevel: inventory?.sku?.max_stock_level || 0
-    }
-  })
-
-  return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-      <div className="bg-gray-50 p-4 rounded-lg">
-        <h4 className="font-medium">{inventory?.sku?.sku_code} - {inventory?.sku?.sku_name}</h4>
-        <p className="text-sm text-gray-600">Current Stock: {inventory?.current_stock}</p>
-      </div>
-
-      <Input
-        label="Minimum Stock Level"
-        type="number"
-        step="0.01"
-        required
-        {...register('minStockLevel', { valueAsNumber: true })}
-        error={errors.minStockLevel?.message}
-      />
-
-      <Input
-        label="Reorder Level"
-        type="number"
-        step="0.01"
-        required
-        {...register('reorderLevel', { valueAsNumber: true })}
-        error={errors.reorderLevel?.message}
-        helpText="System will alert when stock reaches this level"
-      />
-
-      <Input
-        label="Maximum Stock Level"
-        type="number"
-        step="0.01"
-        required
-        {...register('maxStockLevel', { valueAsNumber: true })}
-        error={errors.maxStockLevel?.message}
-      />
-
-      <div className="flex justify-end space-x-3 pt-4 border-t">
-        <Button variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button type="submit" loading={isLoading}>
-          Update Levels
-        </Button>
-      </div>
-    </form>
-  )
-}
-
 export default function InventoryPage() {
-  const { canEdit } = usePermissions()
-  const {
-    inventory,
-    transactions,
-    lowStockItems,
-    inventorySummary,
-    isLoading,
-    updateStock,
-    setReorderLevel,
-    isUpdating
-  } = useInventory()
-
-  const [activeTab, setActiveTab] = useState('inventory')
-  const [isStockModalOpen, setIsStockModalOpen] = useState(false)
-  const [isReorderModalOpen, setIsReorderModalOpen] = useState(false)
-  const [selectedInventory, setSelectedInventory] = useState(null)
+  const { user, hasPermission } = useAuth()
   const [searchTerm, setSearchTerm] = useState('')
-  const [stockFilter, setStockFilter] = useState('all')
-  const [companyFilter, setCompanyFilter] = useState('all')
+  const [categoryFilter, setCategoryFilter] = useState(null)
+  const [stockFilter, setStockFilter] = useState(null)
+  const [selectedSku, setSelectedSku] = useState(null)
+  const [panelOpen, setPanelOpen] = useState(false)
+  const [reportModalOpen, setReportModalOpen] = useState(false)
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false)
 
-  // Filter inventory
-  const filteredInventory = inventory.filter(item => {
-    const matchesSearch = item.sku?.sku_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         item.sku?.sku_code.toLowerCase().includes(searchTerm.toLowerCase())
-
-    const matchesStock = stockFilter === 'all' ||
-                        (stockFilter === 'low' && item.current_stock <= (item.sku?.reorder_level || 0)) ||
-                        (stockFilter === 'out' && item.current_stock <= 0) ||
-                        (stockFilter === 'normal' && item.current_stock > (item.sku?.reorder_level || 0))
-
-    const matchesCompany = companyFilter === 'all' || item.company_id === companyFilter
-
-    return matchesSearch && matchesStock && matchesCompany
+  // Fetch company for report header
+  const { data: company } = useQuery({
+    queryKey: ['company-first'],
+    queryFn: async () => {
+      const { data, error } = await supabase.from('companies').select('company_name').order('created_at', { ascending: false }).limit(1).single()
+      if (error) throw error
+      return data
+    }
   })
 
-  const handleStockAdjustment = (inventory) => {
-    setSelectedInventory(inventory)
-    setIsStockModalOpen(true)
-  }
+  // Fetch categories for filter
+  const { data: categories = [] } = useQuery({
+    queryKey: ['sku-categories'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('sku_categories')
+        .select('id, category_name')
+        .order('category_name')
+      if (error) throw error
+      return data
+    }
+  })
 
-  const handleReorderLevelSetting = (inventory) => {
-    setSelectedInventory(inventory)
-    setIsReorderModalOpen(true)
-  }
+  // Fetch inventory with SKU and category join
+  const { data: inventory = [], isLoading, dataUpdatedAt } = useQuery({
+    queryKey: ['inventory-list'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('inventory')
+        .select(`
+          id,
+          sku_id,
+          current_stock,
+          reserved_stock,
+          available_stock,
+          average_cost,
+          last_purchase_cost,
+          last_purchase_date,
+          updated_at,
+          skus (
+            id,
+            sku_code,
+            sku_name,
+            unit_of_measure,
+            reorder_level,
+            category_id,
+            sku_categories (
+              id,
+              category_name
+            )
+          )
+        `)
+        .order('updated_at', { ascending: false })
+      if (error) throw error
+      return data
+    },
+    refetchInterval: 60000
+  })
 
-  const handleStockSubmit = (data) => {
-    updateStock({
-      inventoryId: selectedInventory.id,
-      ...data
-    })
-    setIsStockModalOpen(false)
-  }
+  // Slide-over: fetch last 10 inward items for selected SKU
+  const { data: skuInwardTxns = [], isLoading: loadingInward } = useQuery({
+    queryKey: ['sku-inward-txns', selectedSku?.sku_id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('vendor_inward_items')
+        .select(`
+          id,
+          quantity,
+          sku_id,
+          inward_id,
+          vendor_inwards (
+            id,
+            inward_number,
+            inward_date,
+            status,
+            vendor_id,
+            vendors ( vendor_name )
+          )
+        `)
+        .eq('sku_id', selectedSku.sku_id)
+        .order('id', { ascending: false })
+        .limit(10)
+      if (error) throw error
+      return (data || []).filter(d => d.vendor_inwards)
+    },
+    enabled: !!selectedSku
+  })
 
-  const handleReorderSubmit = (data) => {
-    setReorderLevel({
-      skuId: selectedInventory.sku_id,
-      ...data
-    })
-    setIsReorderModalOpen(false)
-  }
+  // Slide-over: fetch last 10 outward (invoice) items for selected SKU
+  const { data: skuOutwardTxns = [], isLoading: loadingOutward } = useQuery({
+    queryKey: ['sku-outward-txns', selectedSku?.sku_id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('customer_invoice_items')
+        .select(`
+          id,
+          quantity,
+          sku_id,
+          invoice_id,
+          customer_invoices (
+            id,
+            invoice_number,
+            invoice_date,
+            status,
+            customer_id,
+            customers ( customer_name )
+          )
+        `)
+        .eq('sku_id', selectedSku.sku_id)
+        .order('id', { ascending: false })
+        .limit(10)
+      if (error) throw error
+      return (data || []).filter(d => d.customer_invoices)
+    },
+    enabled: !!selectedSku
+  })
+
+  const categoryOptions = useMemo(() => [
+    { value: null, label: 'All Categories' },
+    ...categories.map(c => ({ value: c.id, label: c.category_name }))
+  ], [categories])
 
   const stockFilterOptions = [
-    { value: 'all', label: 'All Stock' },
-    { value: 'normal', label: 'Normal Stock' },
+    { value: null, label: 'All' },
+    { value: 'ok', label: 'OK' },
     { value: 'low', label: 'Low Stock' },
     { value: 'out', label: 'Out of Stock' }
   ]
 
-  const uniqueCompanies = [...new Set(inventory.map(item => item.company))]
-  const companyFilterOptions = [
-    { value: 'all', label: 'All Companies' },
-    ...uniqueCompanies.map(company => ({
-      value: company?.id,
-      label: company?.company_name
-    }))
-  ]
-
   const getStockStatus = (item) => {
-    if (item.current_stock <= 0) return { label: 'Out of Stock', variant: 'danger' }
-    if (item.current_stock <= (item.sku?.reorder_level || 0)) return { label: 'Low Stock', variant: 'warning' }
-    return { label: 'Normal', variant: 'success' }
+    const qty = item.current_stock ?? 0
+    const reorder = item.skus?.reorder_level ?? 0
+    if (qty <= 0) return { label: 'Out of Stock', variant: 'danger' }
+    if (reorder > 0 && qty <= reorder) return { label: 'Low Stock', variant: 'warning' }
+    return { label: 'In Stock', variant: 'success' }
   }
+
+  const filteredInventory = useMemo(() => {
+    return inventory.filter(item => {
+      const sku = item.skus
+      if (!sku) return false
+
+      // Search filter
+      if (searchTerm) {
+        const term = searchTerm.toLowerCase()
+        const matchesName = sku.sku_name?.toLowerCase().includes(term)
+        const matchesCode = sku.sku_code?.toLowerCase().includes(term)
+        if (!matchesName && !matchesCode) return false
+      }
+
+      // Category filter
+      if (categoryFilter) {
+        if (sku.category_id !== categoryFilter) return false
+      }
+
+      // Stock status filter
+      if (stockFilter) {
+        const status = getStockStatus(item)
+        if (stockFilter === 'ok' && status.variant !== 'success') return false
+        if (stockFilter === 'low' && status.variant !== 'warning') return false
+        if (stockFilter === 'out' && status.variant !== 'danger') return false
+      }
+
+      return true
+    })
+  }, [inventory, searchTerm, categoryFilter, stockFilter])
+
+  const handleRowClick = (item) => {
+    setSelectedSku(item)
+    setPanelOpen(true)
+  }
+
+  const handleGenerateReport = (format) => {
+    setIsGeneratingReport(true)
+    try {
+      const data = filteredInventory
+      if (!data || data.length === 0) {
+        toast.error('No inventory items to export')
+        return
+      }
+      if (format === 'pdf') {
+        generateInventoryReportPDF(data, { companyName: company?.company_name })
+      } else {
+        generateInventoryReportCSV(data)
+      }
+      toast.success(`${format.toUpperCase()} report downloaded!`)
+      setReportModalOpen(false)
+    } catch (err) {
+      toast.error('Report generation failed: ' + err.message)
+    } finally {
+      setIsGeneratingReport(false)
+    }
+  }
+
+  const lastUpdated = dataUpdatedAt
+    ? new Date(dataUpdatedAt).toLocaleString('en-IN')
+    : null
 
   if (isLoading) {
     return (
@@ -272,375 +245,283 @@ export default function InventoryPage() {
   return (
     <div>
       <PageHeader
-        title="Inventory Management"
-        description="Track stock levels, manage inventory, and monitor alerts"
+        title="Inventory"
+        description={lastUpdated ? `Last updated: ${lastUpdated}` : 'Current stock levels'}
+        actions={
+          <Button variant="outline" onClick={() => setReportModalOpen(true)}>
+            <FileDown className="h-4 w-4 mr-2" />
+            Report
+          </Button>
+        }
       />
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Total Items</p>
-                <p className="text-2xl font-bold text-gray-900">{inventorySummary.totalItems}</p>
-              </div>
-              <div className="p-3 rounded-full bg-blue-100">
-                <Package className="h-6 w-6 text-blue-600" />
-              </div>
+      {/* Filters */}
+      <Card className="mb-3 sm:mb-6">
+        <CardContent className="p-3 sm:p-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
+            <div className="relative col-span-2">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search SKU..."
+                className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg w-full text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
             </div>
-          </CardContent>
-        </Card>
+            <Select
+              options={categoryOptions}
+              value={categoryOptions.find(o => o.value === categoryFilter)}
+              onChange={(selected) => setCategoryFilter(selected?.value ?? null)}
+              placeholder="Category"
+              isClearable
+            />
+            <Select
+              options={stockFilterOptions}
+              value={stockFilterOptions.find(o => o.value === stockFilter)}
+              onChange={(selected) => setStockFilter(selected?.value ?? null)}
+              placeholder="Stock Status"
+              isClearable
+            />
+          </div>
+        </CardContent>
+      </Card>
 
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
+      {/* Inventory Table - Desktop */}
+      <Card>
+        <CardContent className="p-0">
+          {filteredInventory.length === 0 ? (
+            <div className="text-center py-12">
+              <Package className="h-12 w-12 mx-auto text-gray-400 mb-3" />
+              <p className="text-gray-500 font-medium">No inventory items found</p>
+              <p className="text-sm text-gray-400 mt-1">Try adjusting your filters</p>
+            </div>
+          ) : (
+            <>
+              {/* Desktop Table */}
+              <div className="hidden md:block">
+                <Table>
+                  <TableHead>
+                    <TableRow>
+                      <TableHeader>SKU Code</TableHeader>
+                      <TableHeader>SKU Name</TableHeader>
+                      <TableHeader>Category</TableHeader>
+                      <TableHeader>Current Stock</TableHeader>
+                      <TableHeader>Unit</TableHeader>
+                      <TableHeader>Reorder Level</TableHeader>
+                      <TableHeader>Status</TableHeader>
+                      <TableHeader>Last Updated</TableHeader>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {filteredInventory.map((item) => {
+                      const sku = item.skus
+                      const status = getStockStatus(item)
+                      return (
+                        <TableRow
+                          key={item.id}
+                          className="cursor-pointer"
+                          onClick={() => handleRowClick(item)}
+                        >
+                          <TableCell className="font-medium font-mono">{sku?.sku_code}</TableCell>
+                          <TableCell>{sku?.sku_name}</TableCell>
+                          <TableCell>{sku?.sku_categories?.category_name || '-'}</TableCell>
+                          <TableCell className="font-semibold">{item.current_stock ?? 0}</TableCell>
+                          <TableCell>{sku?.unit_of_measure || '-'}</TableCell>
+                          <TableCell>{sku?.reorder_level ?? '-'}</TableCell>
+                          <TableCell>
+                            <Badge variant={status.variant}>{status.label}</Badge>
+                          </TableCell>
+                          <TableCell className="text-gray-500 text-xs">
+                            {item.updated_at
+                              ? new Date(item.updated_at).toLocaleDateString('en-IN')
+                              : '-'}
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile Cards */}
+              <div className="md:hidden space-y-3 p-4">
+                {filteredInventory.map((item, index) => {
+                  const sku = item.skus
+                  const status = getStockStatus(item)
+                  return (
+                    <div
+                      key={item.id}
+                      className={`rounded-xl p-4 cursor-pointer active:scale-[0.98] transition-all border ${index % 2 === 0 ? 'bg-white border-gray-200' : 'bg-blue-50/40 border-blue-100'}`}
+                      onClick={() => handleRowClick(item)}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold text-gray-900 truncate">{sku?.sku_name}</p>
+                          <p className="text-xs text-gray-500 font-mono">{sku?.sku_code}</p>
+                        </div>
+                        <Badge variant={status.variant}>{status.label}</Badge>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="text-gray-500">{sku?.sku_categories?.category_name || 'Uncategorized'}</span>
+                        <span className="font-bold text-gray-900">
+                          {item.current_stock ?? 0} <span className="font-normal text-gray-500">{sku?.unit_of_measure || ''}</span>
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Generate Report Modal */}
+      <Modal isOpen={reportModalOpen} onClose={() => setReportModalOpen(false)} title="Generate Inventory Report" size="md">
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            Download the current inventory report with all stock details. The report will include items matching your current filters.
+          </p>
+          <div className="bg-gray-50 rounded-lg p-3 text-sm text-gray-600">
+            <p><strong>{filteredInventory.length}</strong> items will be included based on your current filters.</p>
+          </div>
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button variant="outline" onClick={() => setReportModalOpen(false)}>Cancel</Button>
+            <Button
+              variant="outline"
+              disabled={isGeneratingReport}
+              onClick={() => handleGenerateReport('csv')}
+            >
+              <FileDown className="h-4 w-4 mr-2" />
+              {isGeneratingReport ? 'Generating...' : 'Download CSV'}
+            </Button>
+            <Button
+              disabled={isGeneratingReport}
+              onClick={() => handleGenerateReport('pdf')}
+            >
+              <FileDown className="h-4 w-4 mr-2" />
+              {isGeneratingReport ? 'Generating...' : 'Download PDF'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Slide-over Panel */}
+      {panelOpen && selectedSku && (
+        <div className="fixed inset-0 z-50 overflow-hidden">
+          <div className="absolute inset-0 bg-gray-500 bg-opacity-50" onClick={() => setPanelOpen(false)} />
+          <div className="absolute inset-y-0 right-0 max-w-lg w-full bg-white shadow-xl flex flex-col">
+            {/* Panel Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
               <div>
-                <p className="text-sm font-medium text-gray-600">Total Value</p>
-                <p className="text-2xl font-bold text-gray-900">
-                  ₹{inventorySummary.totalValue.toLocaleString('en-IN')}
+                <h3 className="text-lg font-semibold text-gray-900">
+                  {selectedSku.skus?.sku_code} - {selectedSku.skus?.sku_name}
+                </h3>
+                <p className="text-sm text-gray-500">
+                  {selectedSku.skus?.sku_categories?.category_name || 'Uncategorized'}
                 </p>
               </div>
-              <div className="p-3 rounded-full bg-green-100">
-                <IndianRupee className="h-6 w-6 text-green-600" />
-              </div>
+              <button
+                onClick={() => setPanelOpen(false)}
+                className="p-2 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+              >
+                <X className="h-5 w-5" />
+              </button>
             </div>
-          </CardContent>
-        </Card>
 
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
+            {/* Panel Content */}
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+              {/* Current Stock Card */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-600">Current Stock</p>
+                    <p className="text-3xl font-bold text-gray-900">
+                      {selectedSku.current_stock ?? 0} <span className="text-base font-normal text-gray-500">{selectedSku.skus?.unit_of_measure}</span>
+                    </p>
+                  </div>
+                  <Badge variant={getStockStatus(selectedSku).variant}>
+                    {getStockStatus(selectedSku).label}
+                  </Badge>
+                </div>
+                <div className="mt-2 text-sm text-gray-500">
+                  Reorder Level: {selectedSku.skus?.reorder_level ?? 'Not set'}
+                </div>
+                {selectedSku.average_cost != null && (
+                  <div className="mt-1 text-sm text-gray-500">
+                    Avg Cost: {formatCurrency(selectedSku.average_cost)}
+                  </div>
+                )}
+              </div>
+
+              {/* Inward Transactions */}
               <div>
-                <p className="text-sm font-medium text-gray-600">Low Stock Alerts</p>
-                <p className="text-2xl font-bold text-amber-600">{inventorySummary.lowStockCount}</p>
-              </div>
-              <div className="p-3 rounded-full bg-amber-100">
-                <AlertTriangle className="h-6 w-6 text-amber-600" />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">Out of Stock</p>
-                <p className="text-2xl font-bold text-red-600">{inventorySummary.outOfStockCount}</p>
-              </div>
-              <div className="p-3 rounded-full bg-red-100">
-                <TrendingDown className="h-6 w-6 text-red-600" />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Tab Navigation */}
-      <div className="mb-6">
-        <div className="border-b border-gray-200">
-          <nav className="-mb-px flex space-x-8">
-            <button
-              onClick={() => setActiveTab('inventory')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'inventory'
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              <div className="flex items-center space-x-2">
-                <Package className="h-4 w-4" />
-                <span>Current Inventory</span>
-              </div>
-            </button>
-            <button
-              onClick={() => setActiveTab('transactions')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'transactions'
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              <div className="flex items-center space-x-2">
-                <History className="h-4 w-4" />
-                <span>Stock Movements</span>
-              </div>
-            </button>
-            <button
-              onClick={() => setActiveTab('alerts')}
-              className={`py-2 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'alerts'
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              }`}
-            >
-              <div className="flex items-center space-x-2">
-                <AlertTriangle className="h-4 w-4" />
-                <span>Low Stock Alerts</span>
-              </div>
-            </button>
-          </nav>
-        </div>
-      </div>
-
-      {/* Current Inventory Tab */}
-      {activeTab === 'inventory' && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Current Inventory</CardTitle>
-
-            {/* Filters */}
-            <div className="flex flex-col lg:flex-row gap-4 mt-4">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="Search SKUs..."
-                  className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg w-full focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
-              <Select
-                options={stockFilterOptions}
-                value={stockFilterOptions.find(opt => opt.value === stockFilter)}
-                onChange={(selected) => setStockFilter(selected?.value || 'all')}
-                className="w-full lg:w-48"
-              />
-              <Select
-                options={companyFilterOptions}
-                value={companyFilterOptions.find(opt => opt.value === companyFilter)}
-                onChange={(selected) => setCompanyFilter(selected?.value || 'all')}
-                className="w-full lg:w-48"
-              />
-            </div>
-          </CardHeader>
-
-          <CardContent className="p-0">
-            {filteredInventory.length === 0 ? (
-              <div className="text-center py-12">
-                <Package className="h-12 w-12 mx-auto text-gray-400 mb-3" />
-                <p className="text-gray-500">No inventory items found</p>
-              </div>
-            ) : (
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeader>SKU Code</TableHeader>
-                    <TableHeader>Product Name</TableHeader>
-                    <TableHeader>Company</TableHeader>
-                    <TableHeader>Current Stock</TableHeader>
-                    <TableHeader>Reorder Level</TableHeader>
-                    <TableHeader>Avg. Cost</TableHeader>
-                    <TableHeader>Total Value</TableHeader>
-                    <TableHeader>Status</TableHeader>
-                    <TableHeader>Actions</TableHeader>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {filteredInventory.map((item) => {
-                    const status = getStockStatus(item)
-                    const totalValue = item.current_stock * (item.average_cost || 0)
-
-                    return (
-                      <TableRow key={item.id}>
-                        <TableCell className="font-medium">{item.sku?.sku_code}</TableCell>
-                        <TableCell>{item.sku?.sku_name}</TableCell>
-                        <TableCell>{item.company?.company_name}</TableCell>
-                        <TableCell>{item.current_stock} {item.sku?.unit_of_measure}</TableCell>
-                        <TableCell>{item.sku?.reorder_level || '-'}</TableCell>
-                        <TableCell>₹{item.average_cost?.toFixed(2) || '0.00'}</TableCell>
-                        <TableCell>₹{totalValue.toFixed(2)}</TableCell>
-                        <TableCell>
-                          <Badge variant={status.variant}>{status.label}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center space-x-2">
-                            <PermissionGate module="inventory" action="edit">
-                              <button
-                                onClick={() => handleStockAdjustment(item)}
-                                className="p-1 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-                                title="Adjust Stock"
-                              >
-                                <Edit3 className="h-4 w-4" />
-                              </button>
-                            </PermissionGate>
-
-                            <PermissionGate module="inventory" action="edit">
-                              <button
-                                onClick={() => handleReorderLevelSetting(item)}
-                                className="p-1 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-                                title="Set Reorder Levels"
-                              >
-                                <Settings className="h-4 w-4" />
-                              </button>
-                            </PermissionGate>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Stock Movements Tab */}
-      {activeTab === 'transactions' && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent Stock Movements</CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {transactions.length === 0 ? (
-              <div className="text-center py-12">
-                <History className="h-12 w-12 mx-auto text-gray-400 mb-3" />
-                <p className="text-gray-500">No stock movements found</p>
-              </div>
-            ) : (
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeader>Date</TableHeader>
-                    <TableHeader>SKU</TableHeader>
-                    <TableHeader>Type</TableHeader>
-                    <TableHeader>Quantity</TableHeader>
-                    <TableHeader>Reference</TableHeader>
-                    <TableHeader>Notes</TableHeader>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {transactions.map((transaction) => (
-                    <TableRow key={transaction.id}>
-                      <TableCell>
-                        {new Date(transaction.created_at).toLocaleDateString('en-IN')}
-                      </TableCell>
-                      <TableCell>
-                        {transaction.sku?.sku_code} - {transaction.sku?.sku_name}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center space-x-1">
-                          {transaction.transaction_type === 'stock_in' ? (
-                            <TrendingUp className="h-4 w-4 text-green-600" />
-                          ) : (
-                            <TrendingDown className="h-4 w-4 text-red-600" />
-                          )}
-                          <span className={transaction.transaction_type === 'stock_in' ? 'text-green-600' : 'text-red-600'}>
-                            {transaction.transaction_type === 'stock_in' ? 'Stock In' : 'Stock Out'}
-                          </span>
+                <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-3">
+                  <ArrowDownLeft className="h-4 w-4 text-green-600" />
+                  Last 10 Inward Entries
+                </h4>
+                {loadingInward ? (
+                  <div className="flex justify-center py-4"><Spinner size="sm" /></div>
+                ) : skuInwardTxns.length === 0 ? (
+                  <p className="text-sm text-gray-400 py-3">No inward entries found</p>
+                ) : (
+                  <div className="space-y-2">
+                    {skuInwardTxns.map((txn) => (
+                      <div key={txn.id} className="flex items-center justify-between p-3 bg-green-50 rounded-lg text-sm">
+                        <div>
+                          <p className="font-medium text-gray-900">{txn.vendor_inwards?.inward_number}</p>
+                          <p className="text-xs text-gray-500">
+                            {txn.vendor_inwards?.vendors?.vendor_name || 'Unknown'} &middot;{' '}
+                            {txn.vendor_inwards?.inward_date
+                              ? new Date(txn.vendor_inwards.inward_date).toLocaleDateString('en-IN')
+                              : '-'}
+                          </p>
                         </div>
-                      </TableCell>
-                      <TableCell>{transaction.quantity}</TableCell>
-                      <TableCell>
-                        {transaction.vendor_inward?.inward_number ||
-                         transaction.customer_invoice?.invoice_number ||
-                         'Manual'}
-                      </TableCell>
-                      <TableCell className="max-w-xs truncate">
-                        {transaction.notes || '-'}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Low Stock Alerts Tab */}
-      {activeTab === 'alerts' && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <AlertTriangle className="h-5 w-5 text-amber-600" />
-              <span>Low Stock Alerts</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {lowStockItems.length === 0 ? (
-              <div className="text-center py-12">
-                <Package className="h-12 w-12 mx-auto text-green-400 mb-3" />
-                <p className="text-green-600 font-medium">All stock levels are healthy!</p>
-                <p className="text-gray-500">No low stock alerts at this time.</p>
+                        <div className="text-right">
+                          <p className="font-semibold text-green-700">+{txn.quantity}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            ) : (
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeader>SKU Code</TableHeader>
-                    <TableHeader>Product Name</TableHeader>
-                    <TableHeader>Current Stock</TableHeader>
-                    <TableHeader>Reorder Level</TableHeader>
-                    <TableHeader>Min. Level</TableHeader>
-                    <TableHeader>Status</TableHeader>
-                    <TableHeader>Actions</TableHeader>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {lowStockItems.map((item) => (
-                    <TableRow key={item.id} className="bg-amber-50">
-                      <TableCell className="font-medium">{item.sku?.sku_code}</TableCell>
-                      <TableCell>{item.sku?.sku_name}</TableCell>
-                      <TableCell>
-                        <span className="font-medium text-amber-600">
-                          {item.current_stock} {item.sku?.unit_of_measure}
-                        </span>
-                      </TableCell>
-                      <TableCell>{item.sku?.reorder_level || '-'}</TableCell>
-                      <TableCell>{item.sku?.min_stock_level || '-'}</TableCell>
-                      <TableCell>
-                        <Badge variant="warning">Low Stock</Badge>
-                      </TableCell>
-                      <TableCell>
-                        <PermissionGate module="inventory" action="edit">
-                          <Button
-                            size="sm"
-                            onClick={() => handleStockAdjustment(item)}
-                          >
-                            Restock
-                          </Button>
-                        </PermissionGate>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+
+              {/* Outward Transactions */}
+              <div>
+                <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-700 mb-3">
+                  <ArrowUpRight className="h-4 w-4 text-red-600" />
+                  Last 10 Invoice Entries
+                </h4>
+                {loadingOutward ? (
+                  <div className="flex justify-center py-4"><Spinner size="sm" /></div>
+                ) : skuOutwardTxns.length === 0 ? (
+                  <p className="text-sm text-gray-400 py-3">No invoice entries found</p>
+                ) : (
+                  <div className="space-y-2">
+                    {skuOutwardTxns.map((txn) => (
+                      <div key={txn.id} className="flex items-center justify-between p-3 bg-red-50 rounded-lg text-sm">
+                        <div>
+                          <p className="font-medium text-gray-900">{txn.customer_invoices?.invoice_number}</p>
+                          <p className="text-xs text-gray-500">
+                            {txn.customer_invoices?.customers?.customer_name || 'Unknown'} &middot;{' '}
+                            {txn.customer_invoices?.invoice_date
+                              ? new Date(txn.customer_invoices.invoice_date).toLocaleDateString('en-IN')
+                              : '-'}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-semibold text-red-700">-{txn.quantity}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
-
-      {/* Stock Adjustment Modal */}
-      <Modal
-        isOpen={isStockModalOpen}
-        onClose={() => setIsStockModalOpen(false)}
-        title="Adjust Stock Level"
-      >
-        <StockAdjustmentForm
-          inventory={selectedInventory}
-          onClose={() => setIsStockModalOpen(false)}
-          onSubmit={handleStockSubmit}
-          isLoading={isUpdating}
-        />
-      </Modal>
-
-      {/* Reorder Level Modal */}
-      <Modal
-        isOpen={isReorderModalOpen}
-        onClose={() => setIsReorderModalOpen(false)}
-        title="Set Stock Levels"
-      >
-        <ReorderLevelForm
-          inventory={selectedInventory}
-          onClose={() => setIsReorderModalOpen(false)}
-          onSubmit={handleReorderSubmit}
-          isLoading={isUpdating}
-        />
-      </Modal>
     </div>
   )
 }

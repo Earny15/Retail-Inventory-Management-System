@@ -1,301 +1,201 @@
-import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { useAuth } from '../../hooks/useAuth.simple.jsx'
-import { usePermissions } from '../../hooks/usePermissions.jsx'
+import { useAuth } from '../../hooks/useAuth'
 import {
-  LayoutDashboard,
-  Receipt,
-  PackageOpen,
-  Package,
-  History,
-  BarChart3,
-  Settings,
-  ChevronDown,
-  ChevronRight,
-  Menu,
-  X
+  LayoutDashboard, FileText, FilePlus, PackageOpen, PackagePlus,
+  Package, History, BarChart3, Building2, Layers, Users, Truck,
+  UserCog, X, ChevronDown, ChevronRight, ClipboardList, ClipboardPlus,
+  MessageCircle
 } from 'lucide-react'
+import { useState } from 'react'
 
-const navigation = [
+const navGroups = [
   {
-    name: 'Dashboard',
-    href: '/dashboard',
-    icon: LayoutDashboard,
-    permission: null
-  },
-  {
-    name: 'Invoices',
-    icon: Receipt,
-    permission: 'customer_invoice',
-    children: [
-      { name: 'New Invoice', href: '/invoices/new' },
-      { name: 'Invoice List', href: '/invoices' }
+    items: [
+      { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, module: null },
     ]
   },
   {
-    name: 'Inward',
+    label: 'Invoices',
+    icon: FileText,
+    module: 'customer_invoice',
+    items: [
+      { name: 'New Invoice', href: '/invoices/new', icon: FilePlus },
+      { name: 'Invoice List', href: '/invoices', icon: FileText },
+    ]
+  },
+  {
+    label: 'Sales Quotation',
+    icon: ClipboardList,
+    items: [
+      { name: 'New Quotation', href: '/quotations/new', icon: ClipboardPlus },
+      { name: 'Quotation List', href: '/quotations', icon: ClipboardList },
+    ]
+  },
+  {
+    label: 'Inward',
     icon: PackageOpen,
-    permission: 'vendor_inward',
-    href: '/inward/list',
-    children: [
-      { name: 'New Inward (AI)', href: '/inward/new' },
-      { name: 'Inward History', href: '/inward/list' }
+    module: 'vendor_inward',
+    items: [
+      { name: 'New Inward (AI)', href: '/inward/new', icon: PackagePlus },
+      { name: 'Inward History', href: '/inward', icon: PackageOpen },
     ]
   },
   {
-    name: 'Inventory',
-    href: '/inventory',
-    icon: Package,
-    permission: 'inventory'
-  },
-  {
-    name: 'Transactions',
-    href: '/transactions',
-    icon: History,
-    permission: 'transaction_log'
-  },
-  {
-    name: 'Analytics',
-    href: '/analytics',
-    icon: BarChart3,
-    permission: 'analytics'
-  },
-  {
-    name: 'Masters',
-    icon: Settings,
-    permission: null,
-    children: [
-      { name: 'Company', href: '/masters/company', permission: 'company_master' },
-      { name: 'SKU Master', href: '/masters/skus', permission: 'sku_master' },
-      { name: 'Customers', href: '/masters/customers', permission: 'customer_master' },
-      { name: 'Vendors', href: '/masters/vendors', permission: 'vendor_master' },
-      { name: 'Users & Roles', href: '/masters/users', permission: 'user_role_master' }
+    items: [
+      { name: 'WhatsApp Logs', href: '/whatsapp-logs', icon: MessageCircle },
+      { name: 'Inventory', href: '/inventory', icon: Package, module: 'inventory' },
+      { name: 'Transactions', href: '/transactions', icon: History, module: 'transaction_log' },
+      { name: 'Analytics', href: '/analytics', icon: BarChart3, module: 'analytics' },
     ]
-  }
+  },
+  {
+    label: 'Masters',
+    icon: Building2,
+    items: [
+      { name: 'Company', href: '/masters/company', icon: Building2, module: 'company_master' },
+      { name: 'SKU Master', href: '/masters/skus', icon: Layers, module: 'sku_master' },
+      { name: 'Customers', href: '/masters/customers', icon: Users, module: 'customer_master' },
+      { name: 'Vendors', href: '/masters/vendors', icon: Truck, module: 'vendor_master' },
+      { name: 'Users & Roles', href: '/masters/users', icon: UserCog, module: 'user_role_master' },
+    ]
+  },
 ]
 
-function NavigationItem({ item, isCollapsed }) {
+export default function Sidebar({ onClose }) {
   const location = useLocation()
-  const { canView } = usePermissions()
-  const [isExpanded, setIsExpanded] = useState(false)
+  const { hasPermission } = useAuth()
+  const [expanded, setExpanded] = useState({})
 
-  // Check if this item or any child is active
-  const isActive = item.href === location.pathname ||
-    (item.children && item.children.some(child => child.href === location.pathname))
-
-  // Check permissions
-  if (item.permission && !canView(item.permission)) {
-    return null
+  const toggleGroup = (label) => {
+    setExpanded(prev => ({ ...prev, [label]: !prev[label] }))
   }
 
-  // Filter children by permissions
-  const visibleChildren = item.children?.filter(child =>
-    !child.permission || canView(child.permission)
-  ) || []
+  const isActive = (href) => location.pathname === href
 
-  if (item.children && visibleChildren.length === 0) {
-    return null
-  }
+  const isGroupActive = (items) => items.some(item => location.pathname === item.href)
 
-  const ItemIcon = item.icon
-
-  if (!item.children) {
-    // Simple navigation item
-    return (
-      <li>
-        <Link
-          to={item.href}
-          className={`
-            group flex items-center px-2 py-2 text-sm font-medium rounded-md transition-colors
-            ${isActive
-              ? 'bg-primary-100 text-primary-900'
-              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-            }
-            ${isCollapsed ? 'justify-center px-2' : 'px-2'}
-          `}
-          title={isCollapsed ? item.name : undefined}
-        >
-          <ItemIcon className="h-5 w-5 flex-shrink-0" />
-          {!isCollapsed && <span className="ml-3">{item.name}</span>}
-        </Link>
-      </li>
-    )
-  }
-
-  // Navigation item with children
   return (
-    <li>
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className={`
-          group flex items-center w-full px-2 py-2 text-sm font-medium text-left rounded-md transition-colors
-          ${isActive
-            ? 'bg-primary-100 text-primary-900'
-            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-          }
-          ${isCollapsed ? 'justify-center px-2' : 'px-2'}
-        `}
-        title={isCollapsed ? item.name : undefined}
-      >
-        <ItemIcon className="h-5 w-5 flex-shrink-0" />
-        {!isCollapsed && (
-          <>
-            <span className="ml-3 flex-1">{item.name}</span>
-            {isExpanded ? (
-              <ChevronDown className="h-4 w-4" />
-            ) : (
-              <ChevronRight className="h-4 w-4" />
-            )}
-          </>
-        )}
-      </button>
-
-      {!isCollapsed && isExpanded && (
-        <ul className="mt-1 ml-8 space-y-1">
-          {visibleChildren.map((child) => (
-            <li key={child.href}>
-              <Link
-                to={child.href}
-                className={`
-                  group flex items-center px-2 py-2 text-sm font-medium rounded-md transition-colors
-                  ${child.href === location.pathname
-                    ? 'bg-primary-50 text-primary-700'
-                    : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                  }
-                `}
-              >
-                {child.name}
-              </Link>
-            </li>
-          ))}
-        </ul>
-      )}
-    </li>
-  )
-}
-
-export default function Sidebar() {
-  const [isCollapsed, setIsCollapsed] = useState(false)
-  const [isMobileOpen, setIsMobileOpen] = useState(false)
-  const { user } = useAuth()
-
-  // 🚧 DEVELOPMENT MOCK - Remove in production
-  const mockUser = import.meta.env.DEV ? {
-    full_name: 'Demo Admin',
-    email: 'admin@demo.com'
-  } : null
-
-  const displayUser = user || mockUser
-
-  const sidebarContent = (
-    <>
-      {/* Header */}
-      <div className="flex items-center px-4 py-4 border-b border-gray-200">
-        {!isCollapsed && (
-          <>
-            <h1 className="text-xl font-bold text-gray-900">AluminiumPro</h1>
-            <button
-              onClick={() => setIsCollapsed(!isCollapsed)}
-              className="ml-auto p-1 text-gray-500 hover:text-gray-700 lg:hidden"
-            >
-              <Menu className="h-5 w-5" />
-            </button>
-          </>
-        )}
-        {isCollapsed && (
-          <button
-            onClick={() => setIsCollapsed(!isCollapsed)}
-            className="p-1 text-gray-500 hover:text-gray-700"
-          >
-            <Menu className="h-5 w-5" />
+    <div className="flex flex-col h-full bg-white border-r border-gray-200">
+      {/* Header with blue accent */}
+      <div className="flex items-center justify-between px-4 py-4 bg-navy-600">
+        <Link to="/dashboard" className="flex items-center gap-2.5">
+          <div className="w-9 h-9 bg-white rounded-xl flex items-center justify-center shadow-sm">
+            <span className="text-navy-600 text-sm font-bold">AP</span>
+          </div>
+          <span className="text-lg font-bold text-white tracking-tight">AluminiumPro</span>
+        </Link>
+        {onClose && (
+          <button onClick={onClose} className="lg:hidden p-1.5 rounded-lg hover:bg-white/20">
+            <X className="h-5 w-5 text-white/80" />
           </button>
         )}
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
-        <ul className="space-y-1">
-          {navigation.map((item) => (
-            <NavigationItem
-              key={item.name}
-              item={item}
-              isCollapsed={isCollapsed}
-            />
-          ))}
-        </ul>
+      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+        {navGroups.map((group, gIdx) => {
+          if (group.module && !hasPermission(group.module, 'view')) return null
+
+          if (!group.label) {
+            return (
+              <div key={gIdx}>
+                {group.items.map(item => {
+                  if (item.module && !hasPermission(item.module, 'view')) return null
+                  const Icon = item.icon
+                  return (
+                    <Link
+                      key={item.href}
+                      to={item.href}
+                      onClick={onClose}
+                      className={`flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-xl transition-all ${
+                        isActive(item.href)
+                          ? 'bg-primary-600 text-white shadow-md shadow-primary-600/25'
+                          : 'text-gray-800 hover:bg-navy-50 hover:text-navy-700'
+                      }`}
+                    >
+                      <Icon className={`h-5 w-5 flex-shrink-0 ${isActive(item.href) ? '' : 'text-navy-500'}`} />
+                      <span>{item.name}</span>
+                    </Link>
+                  )
+                })}
+              </div>
+            )
+          }
+
+          const groupActive = isGroupActive(group.items)
+          const isExpanded = expanded[group.label] ?? groupActive
+          const GroupIcon = group.icon
+
+          const visibleItems = group.items.filter(
+            item => !item.module || hasPermission(item.module, 'view')
+          )
+          if (visibleItems.length === 0) return null
+
+          return (
+            <div key={group.label}>
+              <button
+                onClick={() => toggleGroup(group.label)}
+                className={`w-full flex items-center justify-between px-3 py-2.5 text-sm font-medium rounded-xl transition-all ${
+                  groupActive ? 'text-navy-700' : 'text-gray-600 hover:bg-navy-50 hover:text-gray-900'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <GroupIcon className={`h-5 w-5 flex-shrink-0 ${groupActive ? 'text-primary-600' : 'text-navy-400'}`} />
+                  <span>{group.label}</span>
+                </div>
+                {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </button>
+              {isExpanded && (
+                <div className="ml-4 mt-1 space-y-0.5">
+                  {visibleItems.map(item => {
+                    const Icon = item.icon
+                    return (
+                      <Link
+                        key={item.href}
+                        to={item.href}
+                        onClick={onClose}
+                        className={`flex items-center gap-3 px-3 py-2 text-sm rounded-xl transition-all ${
+                          isActive(item.href)
+                            ? 'bg-primary-600 text-white font-medium shadow-md shadow-primary-600/25'
+                            : 'text-gray-700 hover:bg-navy-50 hover:text-navy-700'
+                        }`}
+                      >
+                        <Icon className={`h-4 w-4 flex-shrink-0 ${isActive(item.href) ? '' : 'text-navy-400'}`} />
+                        <span>{item.name}</span>
+                      </Link>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
       </nav>
 
-      {/* User info */}
-      {!isCollapsed && (
-        <div className="border-t border-gray-200 p-4">
-          <div className="flex items-center">
-            <div className="flex-shrink-0">
-              <div className="h-8 w-8 rounded-full bg-primary-600 flex items-center justify-center">
-                <span className="text-white text-sm font-medium">
-                  {displayUser?.full_name?.charAt(0) || 'U'}
-                </span>
-              </div>
-            </div>
-            <div className="ml-3 min-w-0">
-              <p className="text-sm font-medium text-gray-900 truncate">
-                {displayUser?.full_name}
-              </p>
-              <p className="text-xs text-gray-500 truncate">
-                {displayUser?.email}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+      <div className="border-t border-gray-200 p-4">
+        <UserBadge />
+      </div>
+    </div>
   )
+}
+
+function UserBadge() {
+  const { user } = useAuth()
+  const initials = (user?.full_name || 'U')
+    .split(' ')
+    .map(n => n[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2)
 
   return (
-    <>
-      {/* Desktop sidebar */}
-      <div className={`
-        hidden lg:flex lg:flex-col lg:fixed lg:inset-y-0
-        ${isCollapsed ? 'lg:w-16' : 'lg:w-64'}
-        bg-white border-r border-gray-200 transition-all duration-300
-      `}>
-        {sidebarContent}
+    <div className="flex items-center gap-3">
+      <div className="w-9 h-9 rounded-xl bg-navy-600 flex items-center justify-center flex-shrink-0">
+        <span className="text-white text-xs font-bold">{initials}</span>
       </div>
-
-      {/* Mobile sidebar overlay */}
-      {isMobileOpen && (
-        <div className="lg:hidden fixed inset-0 z-40 flex">
-          <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setIsMobileOpen(false)} />
-          <div className="relative flex-1 flex flex-col max-w-xs w-full bg-white">
-            <div className="absolute top-0 right-0 -mr-12 pt-2">
-              <button
-                onClick={() => setIsMobileOpen(false)}
-                className="ml-1 flex items-center justify-center h-10 w-10 rounded-full focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white"
-              >
-                <X className="h-6 w-6 text-white" />
-              </button>
-            </div>
-            {sidebarContent}
-          </div>
-        </div>
-      )}
-
-      {/* Mobile menu button */}
-      <div className="lg:hidden fixed top-0 left-0 z-30 p-4">
-        <button
-          onClick={() => setIsMobileOpen(true)}
-          className="p-2 rounded-md bg-white border border-gray-300 text-gray-600 hover:text-gray-900 hover:bg-gray-50"
-        >
-          <Menu className="h-5 w-5" />
-        </button>
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-gray-900 truncate">{user?.full_name || 'User'}</p>
+        <p className="text-xs text-gray-500 truncate">{user?.role_name || 'Admin'}</p>
       </div>
-
-      {/* Collapsed state indicator for desktop */}
-      {isCollapsed && (
-        <div className="hidden lg:block lg:pl-16" />
-      )}
-      {!isCollapsed && (
-        <div className="hidden lg:block lg:pl-64" />
-      )}
-    </>
+    </div>
   )
 }

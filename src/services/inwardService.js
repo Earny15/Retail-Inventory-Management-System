@@ -1,5 +1,6 @@
 /**
  * Inward Service - Business logic for vendor inward transactions
+ * Uses: vendor_inwards, vendor_inward_items, inventory, vendors, skus tables
  */
 
 import { supabase } from './supabase'
@@ -15,39 +16,6 @@ export function generateInwardNumber() {
 }
 
 /**
- * Save inward session for AI processing tracking
- */
-export async function saveInwardSession(data) {
-  const { data: session, error } = await supabase
-    .from('inward_sessions')
-    .insert({
-      vendor_id: data.vendorId,
-      invoice_image_url: data.imageUrl,
-      ai_raw_response: data.aiResponse,
-      ai_extracted_items: data.extractedItems,
-      status: 'PROCESSING',
-      created_by: data.userId
-    })
-    .select()
-    .single()
-
-  if (error) throw error
-  return session
-}
-
-/**
- * Update inward session status
- */
-export async function updateInwardSession(sessionId, updates) {
-  const { error } = await supabase
-    .from('inward_sessions')
-    .update(updates)
-    .eq('id', sessionId)
-
-  if (error) throw error
-}
-
-/**
  * Confirm inward transaction and update inventory
  */
 export async function confirmInward(data) {
@@ -57,114 +25,83 @@ export async function confirmInward(data) {
     invoiceNo,
     invoiceDate,
     notes,
-    sessionId,
     userId
   } = data
 
   try {
-    // Start transaction
-    console.log('🚀 Starting inward confirmation process...')
+    console.log('Starting inward confirmation process...')
 
-    // 1. Generate reference number
-    const referenceNo = generateInwardNumber()
+    // 1. Generate inward number
+    const inwardNumber = generateInwardNumber()
 
     // 2. Calculate totals
     const subtotal = items.reduce((sum, item) => sum + (item.quantity * item.rate), 0)
     const taxAmount = items.reduce((sum, item) => {
       const gstRate = item.gst_rate || 18
-      const taxableAmount = (item.quantity * item.rate) / (1 + gstRate / 100)
-      return sum + (taxableAmount * gstRate / 100)
+      return sum + (item.quantity * item.rate * gstRate / 100)
     }, 0)
-    const grandTotal = subtotal
+    const grandTotal = subtotal + taxAmount
 
-    // 3. Insert transaction header
-    const { data: transaction, error: transactionError } = await supabase
-      .from('transactions')
+    // 3. Insert vendor_inwards header
+    const { data: inward, error: inwardError } = await supabase
+      .from('vendor_inwards')
       .insert({
-        transaction_type: 'INWARD',
-        reference_no: referenceNo,
-        transaction_date: invoiceDate || new Date().toISOString().slice(0, 10),
+        inward_number: inwardNumber,
         vendor_id: vendorId,
+        inward_date: invoiceDate || new Date().toISOString().slice(0, 10),
         status: 'CONFIRMED',
         subtotal: subtotal,
-        total_cgst: 0, // For inward, we don't calculate GST splits
-        total_sgst: 0,
-        total_igst: taxAmount,
-        grand_total: grandTotal,
-        notes: notes,
+        total_gst_amount: taxAmount,
+        total_amount: grandTotal,
+        notes: notes || null,
         created_by: userId
       })
       .select()
       .single()
 
-    if (transactionError) throw transactionError
+    if (inwardError) throw inwardError
 
-    // 4. Insert transaction items and update inventory
-    const inventoryUpdates = []
-    const costLogEntries = []
-    const transactionItems = []
-
+    // 4. Insert vendor_inward_items and update inventory
     for (const item of items) {
-      // Insert transaction item
+      const amount = item.quantity * item.rate
+      const gstRate = item.gst_rate || 18
+
+      // Insert inward item
       const { error: itemError } = await supabase
-        .from('transaction_items')
+        .from('vendor_inward_items')
         .insert({
-          transaction_id: transaction.id,
+          inward_id: inward.id,
           sku_id: item.sku_id,
-          vendor_item_name: item.vendor_item_name,
-          quantity_vendor_unit: item.quantity_vendor_unit,
-          vendor_unit: item.vendor_unit,
-          quantity: item.quantity_internal,
-          unit: item.internal_unit,
-          buying_cost_per_unit: item.rate,
-          taxable_amount: (item.quantity * item.rate) / (1 + (item.gst_rate || 18) / 100),
-          gst_rate: item.gst_rate || 18,
-          cgst_amount: 0,
-          sgst_amount: 0,
-          igst_amount: ((item.quantity * item.rate) / (1 + (item.gst_rate || 18) / 100)) * (item.gst_rate || 18) / 100,
-          total_amount: item.quantity * item.rate
+          vendor_item_name: item.vendor_item_name || null,
+          quantity: item.quantity,
+          unit: item.unit || item.vendor_unit || 'PCS',
+          rate: item.rate,
+          amount: amount,
+          gst_rate: gstRate
         })
 
       if (itemError) throw itemError
 
-      // Prepare inventory update
-      inventoryUpdates.push({
-        sku_id: item.sku_id,
-        quantity_to_add: item.quantity_internal
-      })
-
-      // Prepare cost log entry
-      costLogEntries.push({
-        sku_id: item.sku_id,
-        transaction_id: transaction.id,
-        quantity: item.quantity_vendor_unit,
-        vendor_unit: item.vendor_unit,
-        internal_unit: item.internal_unit,
-        buying_cost_per_unit: item.rate,
-        total_cost: item.quantity * item.rate,
-        conversion_factor: item.conversion_factor || 1,
-        cost_per_internal_unit: item.rate / (item.conversion_factor || 1)
-      })
-    }
-
-    // 5. Update inventory quantities
-    for (const update of inventoryUpdates) {
-      // First check if inventory record exists
+      // Update inventory - check if record exists first
       const { data: existingInventory } = await supabase
         .from('inventory')
         .select('*')
-        .eq('sku_id', update.sku_id)
+        .eq('sku_id', item.sku_id)
         .single()
 
       if (existingInventory) {
         // Update existing inventory
+        const newStock = (existingInventory.current_stock || 0) + item.quantity
         const { error: invError } = await supabase
           .from('inventory')
           .update({
-            quantity: existingInventory.quantity + update.quantity_to_add,
-            last_updated: new Date().toISOString()
+            current_stock: newStock,
+            available_stock: newStock - (existingInventory.reserved_stock || 0),
+            last_purchase_cost: item.rate,
+            last_purchase_date: invoiceDate || new Date().toISOString().slice(0, 10),
+            updated_at: new Date().toISOString()
           })
-          .eq('sku_id', update.sku_id)
+          .eq('sku_id', item.sku_id)
 
         if (invError) throw invError
       } else {
@@ -172,47 +109,25 @@ export async function confirmInward(data) {
         const { error: invError } = await supabase
           .from('inventory')
           .insert({
-            sku_id: update.sku_id,
-            quantity: update.quantity_to_add,
-            last_updated: new Date().toISOString()
+            sku_id: item.sku_id,
+            current_stock: item.quantity,
+            reserved_stock: 0,
+            available_stock: item.quantity,
+            average_cost: item.rate,
+            last_purchase_cost: item.rate,
+            last_purchase_date: invoiceDate || new Date().toISOString().slice(0, 10),
+            updated_at: new Date().toISOString()
           })
 
         if (invError) throw invError
       }
     }
 
-    // 6. Insert buying cost log entries
-    if (costLogEntries.length > 0) {
-      const { error: costLogError } = await supabase
-        .from('sku_buying_cost_log')
-        .insert(costLogEntries)
-
-      if (costLogError) throw costLogError
-    }
-
-    // 7. Update inward session status
-    if (sessionId) {
-      await updateInwardSession(sessionId, {
-        status: 'COMPLETED',
-        transaction_id: transaction.id
-      })
-    }
-
-    console.log('✅ Inward confirmation completed:', referenceNo)
-    return { transaction, referenceNo }
+    console.log('Inward confirmation completed:', inwardNumber)
+    return { inward, inwardNumber }
 
   } catch (error) {
-    console.error('❌ Inward confirmation failed:', error)
-
-    // Update session status to failed if we have a sessionId
-    if (sessionId) {
-      try {
-        await updateInwardSession(sessionId, { status: 'FAILED' })
-      } catch (updateError) {
-        console.error('Failed to update session status:', updateError)
-      }
-    }
-
+    console.error('Inward confirmation failed:', error)
     throw error
   }
 }
@@ -220,45 +135,41 @@ export async function confirmInward(data) {
 /**
  * Reverse an inward transaction
  */
-export async function reverseInward(transactionId, reversalReason, userId) {
+export async function reverseInward(inwardId, reversalReason, userId) {
   try {
-    console.log('🔄 Starting inward reversal process...')
+    console.log('Starting inward reversal process...')
 
-    // 1. Get original transaction with items
-    const { data: originalTx, error: txError } = await supabase
-      .from('transactions')
+    // 1. Get original inward with items
+    const { data: originalInward, error: inwardError } = await supabase
+      .from('vendor_inwards')
       .select(`
         *,
-        transaction_items(*)
+        vendor_inward_items(*)
       `)
-      .eq('id', transactionId)
+      .eq('id', inwardId)
       .single()
 
-    if (txError) throw txError
+    if (inwardError) throw inwardError
 
-    if (originalTx.status !== 'CONFIRMED') {
-      throw new Error('Only CONFIRMED transactions can be reversed')
+    if (originalInward.status !== 'CONFIRMED') {
+      throw new Error('Only CONFIRMED inwards can be reversed')
     }
 
-    // 2. Generate reversal reference number
-    const reversalRefNo = `REV-${originalTx.reference_no}`
+    // 2. Generate reversal inward number
+    const reversalInwardNumber = `REV-${originalInward.inward_number}`
 
-    // 3. Insert reversal transaction
-    const { data: reversalTx, error: reversalError } = await supabase
-      .from('transactions')
+    // 3. Insert reversal inward record
+    const { data: reversalInward, error: reversalError } = await supabase
+      .from('vendor_inwards')
       .insert({
-        transaction_type: 'INWARD_REVERSAL',
-        reference_no: reversalRefNo,
-        transaction_date: new Date().toISOString().slice(0, 10),
-        vendor_id: originalTx.vendor_id,
+        inward_number: reversalInwardNumber,
+        vendor_id: originalInward.vendor_id,
+        inward_date: new Date().toISOString().slice(0, 10),
         status: 'CONFIRMED',
-        parent_transaction_id: transactionId,
-        subtotal: -originalTx.subtotal,
-        total_cgst: -originalTx.total_cgst,
-        total_sgst: -originalTx.total_sgst,
-        total_igst: -originalTx.total_igst,
-        grand_total: -originalTx.grand_total,
-        reversal_reason: reversalReason,
+        subtotal: -(originalInward.subtotal || 0),
+        total_gst_amount: -(originalInward.total_gst_amount || 0),
+        total_amount: -(originalInward.total_amount || 0),
+        notes: `Reversal of ${originalInward.inward_number}. Reason: ${reversalReason}`,
         created_by: userId
       })
       .select()
@@ -266,55 +177,59 @@ export async function reverseInward(transactionId, reversalReason, userId) {
 
     if (reversalError) throw reversalError
 
-    // 4. Insert reversal transaction items and update inventory
-    for (const item of originalTx.transaction_items) {
-      // Insert reversal item
+    // 4. Insert reversal items and update inventory
+    for (const item of originalInward.vendor_inward_items) {
+      // Insert reversal item with negative quantity
       const { error: itemError } = await supabase
-        .from('transaction_items')
+        .from('vendor_inward_items')
         .insert({
-          transaction_id: reversalTx.id,
+          inward_id: reversalInward.id,
           sku_id: item.sku_id,
           vendor_item_name: item.vendor_item_name,
-          quantity_vendor_unit: -item.quantity_vendor_unit,
-          vendor_unit: item.vendor_unit,
-          quantity: -item.quantity,
+          quantity: -(item.quantity || 0),
           unit: item.unit,
-          buying_cost_per_unit: item.buying_cost_per_unit,
-          taxable_amount: -item.taxable_amount,
-          gst_rate: item.gst_rate,
-          cgst_amount: -item.cgst_amount,
-          sgst_amount: -item.sgst_amount,
-          igst_amount: -item.igst_amount,
-          total_amount: -item.total_amount
+          rate: item.rate,
+          amount: -(item.amount || 0),
+          gst_rate: item.gst_rate
         })
 
       if (itemError) throw itemError
 
-      // Update inventory (subtract the quantity)
-      const { error: invError } = await supabase
+      // Update inventory - subtract the quantity
+      const { data: existingInventory } = await supabase
         .from('inventory')
-        .update({
-          quantity: supabase.sql`quantity - ${item.quantity}`,
-          last_updated: new Date().toISOString()
-        })
+        .select('*')
         .eq('sku_id', item.sku_id)
+        .single()
 
-      if (invError) throw invError
+      if (existingInventory) {
+        const newStock = (existingInventory.current_stock || 0) - (item.quantity || 0)
+        const { error: invError } = await supabase
+          .from('inventory')
+          .update({
+            current_stock: newStock,
+            available_stock: newStock - (existingInventory.reserved_stock || 0),
+            updated_at: new Date().toISOString()
+          })
+          .eq('sku_id', item.sku_id)
+
+        if (invError) throw invError
+      }
     }
 
-    // 5. Update original transaction status
+    // 5. Update original inward status
     const { error: updateError } = await supabase
-      .from('transactions')
+      .from('vendor_inwards')
       .update({ status: 'REVERSED' })
-      .eq('id', transactionId)
+      .eq('id', inwardId)
 
     if (updateError) throw updateError
 
-    console.log('✅ Inward reversal completed:', reversalRefNo)
-    return reversalTx
+    console.log('Inward reversal completed:', reversalInwardNumber)
+    return reversalInward
 
   } catch (error) {
-    console.error('❌ Inward reversal failed:', error)
+    console.error('Inward reversal failed:', error)
     throw error
   }
 }
@@ -322,18 +237,18 @@ export async function reverseInward(transactionId, reversalReason, userId) {
 /**
  * Get inward transaction details
  */
-export async function getInwardDetails(transactionId) {
+export async function getInwardDetails(inwardId) {
   const { data, error } = await supabase
-    .from('transactions')
+    .from('vendor_inwards')
     .select(`
       *,
-      vendors(vendor_name),
-      transaction_items(
+      vendors(vendor_name, vendor_code, contact_person, phone, email, city, state, gstin),
+      vendor_inward_items(
         *,
         skus(sku_code, sku_name, unit_of_measure)
       )
     `)
-    .eq('id', transactionId)
+    .eq('id', inwardId)
     .single()
 
   if (error) throw error
@@ -345,13 +260,12 @@ export async function getInwardDetails(transactionId) {
  */
 export async function getInwardList(filters = {}) {
   let query = supabase
-    .from('transactions')
+    .from('vendor_inwards')
     .select(`
       *,
       vendors(vendor_name),
-      transaction_items(id)
+      vendor_inward_items(id)
     `)
-    .in('transaction_type', ['INWARD', 'INWARD_REVERSAL'])
     .order('created_at', { ascending: false })
 
   // Apply filters
@@ -364,17 +278,17 @@ export async function getInwardList(filters = {}) {
   }
 
   if (filters.startDate && filters.endDate) {
-    query = query.gte('transaction_date', filters.startDate)
-                   .lte('transaction_date', filters.endDate)
+    query = query.gte('inward_date', filters.startDate)
+                   .lte('inward_date', filters.endDate)
   }
 
   const { data, error } = await query
 
   if (error) throw error
 
-  // Add item count to each transaction
-  return data.map(tx => ({
-    ...tx,
-    items_count: tx.transaction_items.length
+  // Add item count to each inward
+  return data.map(inward => ({
+    ...inward,
+    items_count: inward.vendor_inward_items?.length || 0
   }))
 }

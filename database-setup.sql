@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS skus (
   weight_per_unit DECIMAL(10,3),
   dimensions VARCHAR(100),
   gst_rate DECIMAL(5,2) DEFAULT 18,
+  selling_price DECIMAL(10,2) DEFAULT 0,
   hsn_code VARCHAR(20),
   min_stock_level DECIMAL(10,2) DEFAULT 0,
   max_stock_level DECIMAL(10,2),

@@ -1,104 +1,84 @@
 import { useState } from 'react'
-import { useAuth } from '../../hooks/useAuth.simple.jsx'
 import { useNavigate } from 'react-router-dom'
-import Button from '../../components/ui/Button'
-import Input from '../../components/ui/Input'
-import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { z } from 'zod'
-import { Spinner } from '../../components/ui/Spinner'
-
-const loginSchema = z.object({
-  email: z.string().email('Invalid email address'),
-  password: z.string().min(6, 'Password must be at least 6 characters')
-})
+import { useAuth } from '../../hooks/useAuth'
+import toast from 'react-hot-toast'
 
 export default function LoginPage() {
-  const { signIn, loading: authLoading } = useAuth()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const { login } = useAuth()
   const navigate = useNavigate()
-  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors }
-  } = useForm({
-    resolver: zodResolver(loginSchema)
-  })
-
-  const onSubmit = async (data) => {
-    setIsSubmitting(true)
-
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!email || !password) {
+      toast.error('Please enter email and password')
+      return
+    }
+    setLoading(true)
     try {
-      const result = await signIn(data.email, data.password)
-
-      if (result.success) {
-        navigate('/dashboard')
-      }
-    } catch (error) {
-      console.error('Login error:', error)
+      await login(email, password)
+      toast.success('Welcome back!')
+      navigate('/dashboard', { replace: true })
+    } catch (err) {
+      toast.error(err.message || 'Login failed')
     } finally {
-      setIsSubmitting(false)
+      setLoading(false)
     }
   }
 
-  if (authLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <Spinner size="xl" />
-      </div>
-    )
-  }
-
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
-        <div className="text-center">
-          <h2 className="text-3xl font-bold text-gray-900">AluminiumPro</h2>
-          <p className="mt-2 text-gray-600">Hardware Shop Management System</p>
-        </div>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-navy-800 via-navy-900 to-black px-4">
+      <div className="max-w-md w-full">
+        <div className="bg-white rounded-2xl shadow-2xl p-8">
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-primary-600 rounded-2xl mb-4 shadow-lg shadow-primary-600/30">
+              <span className="text-white text-2xl font-bold">AP</span>
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">AluminiumPro</h1>
+            <p className="text-gray-500 mt-1">Sign in to your account</p>
+          </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Sign in to your account</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-              <Input
-                label="Email"
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <input
                 type="email"
-                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition"
+                placeholder="you@example.com"
                 autoComplete="email"
-                {...register('email')}
-                error={errors.email?.message}
               />
+            </div>
 
-              <Input
-                label="Password"
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+              <input
                 type="password"
-                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition"
+                placeholder="Enter your password"
                 autoComplete="current-password"
-                {...register('password')}
-                error={errors.password?.message}
               />
+            </div>
 
-              <Button
-                type="submit"
-                loading={isSubmitting}
-                className="w-full"
-                size="lg"
-              >
-                Sign In
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-
-        <div className="text-center text-sm text-gray-600">
-          <p>Demo Credentials:</p>
-          <p>Email: admin@aluminiumshop.com</p>
-          <p>Password: admin123</p>
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-primary-600 hover:bg-primary-700 text-white font-semibold py-2.5 rounded-lg transition shadow-md shadow-primary-600/25 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {loading && (
+                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              )}
+              {loading ? 'Signing in...' : 'Sign In'}
+            </button>
+          </form>
         </div>
       </div>
     </div>

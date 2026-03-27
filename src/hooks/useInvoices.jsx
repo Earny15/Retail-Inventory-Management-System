@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../services/supabase'
-import { useAuth } from './useAuth.simple.jsx'
+import { useAuth } from './useAuth'
 import { generateInvoiceNumber } from '../utils/invoiceGenerator'
 import { calculateInvoiceTotals, determineGSTType, GST_TYPES } from '../utils/gstCalculator'
 import toast from 'react-hot-toast'
@@ -30,7 +30,7 @@ export function useInvoices() {
             billing_address_line2,
             billing_city,
             billing_state,
-            billing_gstin
+            gstin
           ),
           company:companies(
             company_name,
@@ -40,9 +40,9 @@ export function useInvoices() {
             state,
             gstin
           ),
-          invoice_items:customer_invoice_items(
+          customer_invoice_items(
             *,
-            sku:skus(sku_code, sku_name, unit_of_measure)
+            sku:skus(sku_code, sku_name, unit_of_measure, hsn_code)
           )
         `)
         .order('created_at', { ascending: false })
@@ -63,7 +63,7 @@ export function useInvoices() {
             *,
             customer:customers(*),
             company:companies(*),
-            invoice_items:customer_invoice_items(
+            customer_invoice_items(
               *,
               sku:skus(*)
             )

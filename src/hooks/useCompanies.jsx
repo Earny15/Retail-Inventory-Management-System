@@ -1,13 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../services/supabase'
-import { useAuth } from './useAuth.simple.jsx'
+import { useAuth } from './useAuth'
 import toast from 'react-hot-toast'
 
 export function useCompanies() {
   const queryClient = useQueryClient()
   const { user } = useAuth()
 
-  // Fetch companies
   const {
     data: companies = [],
     isLoading,
@@ -19,53 +18,18 @@ export function useCompanies() {
         .from('companies')
         .select('*')
         .order('created_at', { ascending: false })
-
       if (error) throw error
       return data || []
     }
   })
 
-  // Create company mutation
   const createCompanyMutation = useMutation({
     mutationFn: async (companyData) => {
-      // Map form fields to database fields
-      const processedData = {
-        ...companyData,
-        // Handle development mode where user might be null
-        ...(user?.id && { created_by: user.id })
-      }
-
-      // Remove fields that don't exist in database
-      const fieldsToRemove = [
-        'trade_name',
-        'alternate_phone',
-        'account_holder_name',
-        'invoice_start_number',
-        'invoice_current_number',
-        'terms_and_conditions'
-      ]
-      fieldsToRemove.forEach(field => {
-        if (processedData[field] !== undefined) {
-          delete processedData[field]
-        }
-      })
-
-      // Company table actually has address_line1/address_line2 per schema - no mapping needed
-      const fieldMapping = {}  // No field mapping needed for companies
-
-      Object.keys(fieldMapping).forEach(formField => {
-        if (processedData[formField] !== undefined) {
-          processedData[fieldMapping[formField]] = processedData[formField]
-          delete processedData[formField]
-        }
-      })
-
       const { data, error } = await supabase
         .from('companies')
-        .insert(processedData)
+        .insert(companyData)
         .select()
         .single()
-
       if (error) throw error
       return data
     },
@@ -74,56 +38,92 @@ export function useCompanies() {
       toast.success('Company created successfully')
     },
     onError: (error) => {
-      console.error('Error creating company:', error)
-      const errorMessage = error.message || 'Failed to create company'
-      toast.error(`Company creation failed: ${errorMessage}`)
+      toast.error(`Failed: ${error.message}`)
     }
   })
 
-  // Update company mutation
+  const uploadLogoMutation = useMutation({
+    mutationFn: async ({ companyId, file }) => {
+      const ext = file.name.split('.').pop()
+      const filePath = `${companyId}/logo.${ext}`
+
+      // Remove old logo files
+      const { data: existingFiles } = await supabase.storage
+        .from('company-logos')
+        .list(companyId)
+      if (existingFiles?.length) {
+        await supabase.storage
+          .from('company-logos')
+          .remove(existingFiles.map(f => `${companyId}/${f.name}`))
+      }
+
+      // Upload new logo
+      const { error: uploadError } = await supabase.storage
+        .from('company-logos')
+        .upload(filePath, file, { upsert: true })
+      if (uploadError) throw uploadError
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('company-logos')
+        .getPublicUrl(filePath)
+
+      return publicUrl
+    },
+    onError: (error) => {
+      toast.error(`Logo upload failed: ${error.message}`)
+    }
+  })
+
   const updateCompanyMutation = useMutation({
     mutationFn: async ({ id, ...companyData }) => {
-      // Map form fields to database fields
-      const processedData = { ...companyData }
-
-      console.log('🔍 Company update - Original data:', companyData)
-
-      // Remove fields that don't exist in database
-      const fieldsToRemove = [
-        'trade_name',
-        'alternate_phone',
-        'account_holder_name',
-        'invoice_start_number',
-        'invoice_current_number',
-        'terms_and_conditions'
+      // Strip any fields that cause errors (columns that may not exist yet)
+      const safeData = { ...companyData }
+      const knownColumns = [
+        'company_name', 'company_code', 'address_line1', 'address_line2',
+        'city', 'state', 'pincode', 'phone', 'email', 'gstin', 'pan_number',
+        'bank_name', 'bank_account_number', 'ifsc_code',
+        'invoice_prefix', 'invoice_footer',
+        'terms_and_conditions', 'declaration', 'logo_url'
       ]
-      fieldsToRemove.forEach(field => {
-        if (processedData[field] !== undefined) {
-          console.log(`🗑️ Removing field: ${field} =`, processedData[field])
-          delete processedData[field]
-        }
+      // Remove any field not in known columns
+      Object.keys(safeData).forEach(key => {
+        if (!knownColumns.includes(key)) delete safeData[key]
       })
 
-      console.log('✅ Company update - Processed data:', processedData)
-
-      // Company table actually has address_line1/address_line2 per schema - no mapping needed
-      const fieldMapping = {}  // No field mapping needed for companies
-
-      Object.keys(fieldMapping).forEach(formField => {
-        if (processedData[formField] !== undefined) {
-          processedData[fieldMapping[formField]] = processedData[formField]
-          delete processedData[formField]
-        }
-      })
-
-      const { data, error } = await supabase
+      // First attempt with all fields
+      let { data, error } = await supabase
         .from('companies')
-        .update(processedData)
+        .update(safeData)
         .eq('id', id)
         .select()
         .single()
 
-      if (error) throw error
+      // If it fails (likely missing columns), retry with only core fields
+      if (error) {
+        console.warn('Full update failed, retrying with core fields:', error.message)
+        const coreData = {}
+        const coreColumns = [
+          'company_name', 'company_code', 'address_line1', 'address_line2',
+          'city', 'state', 'pincode', 'phone', 'email', 'gstin', 'pan_number',
+          'bank_name', 'bank_account_number', 'ifsc_code',
+          'invoice_prefix', 'invoice_footer'
+        ]
+        coreColumns.forEach(key => {
+          if (safeData[key] !== undefined) coreData[key] = safeData[key]
+        })
+
+        const result = await supabase
+          .from('companies')
+          .update(coreData)
+          .eq('id', id)
+          .select()
+          .single()
+
+        if (result.error) throw result.error
+        return result.data
+      }
+
       return data
     },
     onSuccess: () => {
@@ -131,29 +131,8 @@ export function useCompanies() {
       toast.success('Company updated successfully')
     },
     onError: (error) => {
-      console.error('Error updating company:', error)
-      const errorMessage = error.message || 'Failed to update company'
-      toast.error(`Company update failed: ${errorMessage}`)
-    }
-  })
-
-  // Delete company mutation (soft delete - just mark as inactive)
-  const deleteCompanyMutation = useMutation({
-    mutationFn: async (companyId) => {
-      const { error } = await supabase
-        .from('companies')
-        .update({ is_active: false })
-        .eq('id', companyId)
-
-      if (error) throw error
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['companies'] })
-      toast.success('Company deactivated')
-    },
-    onError: (error) => {
-      console.error('Error deactivating company:', error)
-      toast.error('Failed to deactivate company')
+      console.error('Company update error:', error)
+      toast.error(`Failed: ${error.message}`)
     }
   })
 
@@ -163,9 +142,9 @@ export function useCompanies() {
     error,
     createCompany: createCompanyMutation.mutate,
     updateCompany: updateCompanyMutation.mutate,
-    deleteCompany: deleteCompanyMutation.mutate,
+    uploadLogo: uploadLogoMutation.mutateAsync,
     isCreating: createCompanyMutation.isPending,
     isUpdating: updateCompanyMutation.isPending,
-    isDeleting: deleteCompanyMutation.isPending
+    isUploadingLogo: uploadLogoMutation.isPending
   }
 }

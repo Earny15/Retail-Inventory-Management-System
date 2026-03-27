@@ -6,6 +6,7 @@ export const PERMISSION_MODULES = {
   VENDOR_MASTER: 'vendor_master',
   VENDOR_INWARD: 'vendor_inward',
   CUSTOMER_INVOICE: 'customer_invoice',
+  SALES_QUOTATION: 'sales_quotation',
   INVENTORY: 'inventory',
   TRANSACTION_LOG: 'transaction_log',
   ANALYTICS: 'analytics',
@@ -20,8 +21,8 @@ export const PERMISSION_ACTIONS = {
   DELETE: 'delete'
 }
 
-// Merge role permissions with user overrides
-export function resolveUserPermissions(rolePermissions = [], userOverrides = []) {
+// Resolve user permissions from user_permissions rows into a lookup object
+export function resolveUserPermissions(userPerms = []) {
   const permissions = {}
 
   // Initialize all modules with false permissions
@@ -34,33 +35,14 @@ export function resolveUserPermissions(rolePermissions = [], userOverrides = [])
     }
   })
 
-  // Apply role permissions
-  rolePermissions.forEach(perm => {
+  // Apply user permissions
+  userPerms.forEach(perm => {
     if (permissions[perm.module]) {
       permissions[perm.module] = {
         can_view: perm.can_view || false,
         can_create: perm.can_create || false,
         can_edit: perm.can_edit || false,
         can_delete: perm.can_delete || false
-      }
-    }
-  })
-
-  // Apply user overrides (these take precedence)
-  userOverrides.forEach(override => {
-    if (permissions[override.module]) {
-      // Only override if the value is explicitly set (not null)
-      if (override.can_view !== null) {
-        permissions[override.module].can_view = override.can_view
-      }
-      if (override.can_create !== null) {
-        permissions[override.module].can_create = override.can_create
-      }
-      if (override.can_edit !== null) {
-        permissions[override.module].can_edit = override.can_edit
-      }
-      if (override.can_delete !== null) {
-        permissions[override.module].can_delete = override.can_delete
       }
     }
   })

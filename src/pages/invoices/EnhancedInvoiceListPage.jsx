@@ -41,7 +41,8 @@ import {
   TrendingDown,
   DollarSign,
   Users,
-  Receipt
+  Receipt,
+  Copy
 } from 'lucide-react'
 
 function PaymentStatusBadge({ status, daysOverdue }) {
@@ -304,6 +305,19 @@ export default function EnhancedInvoiceListPage() {
     }
   }
 
+  const handleCopyLink = async (invoice) => {
+    if (invoice.public_pdf_url) {
+      try {
+        await navigator.clipboard.writeText(invoice.public_pdf_url)
+        alert('Link copied to clipboard!')
+      } catch (error) {
+        alert('Failed to copy link: ' + error.message)
+      }
+    } else {
+      alert('Public PDF link not available for this invoice.')
+    }
+  }
+
   const handleSendReminder = (invoice, type = 'GENTLE') => {
     reminderMutation.mutate({ invoiceId: invoice.id, type })
   }
@@ -370,7 +384,7 @@ export default function EnhancedInvoiceListPage() {
                   <p className="text-sm text-gray-600">Total Invoices</p>
                   <p className="text-2xl font-bold">{dashboardStats.totalInvoices}</p>
                 </div>
-                <Receipt className="h-8 w-8 text-blue-600" />
+                <Receipt className="h-8 w-8 text-navy-600" />
               </div>
             </CardContent>
           </Card>
@@ -578,6 +592,16 @@ export default function EnhancedInvoiceListPage() {
                             >
                               <Download className="h-4 w-4" />
                             </Button>
+                            {invoice.public_pdf_url && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => handleCopyLink(invoice)}
+                                title="Copy public link"
+                              >
+                                <Copy className="h-4 w-4" />
+                              </Button>
+                            )}
                             <Button
                               variant="ghost"
                               size="sm"
@@ -673,6 +697,16 @@ export default function EnhancedInvoiceListPage() {
                         <Download className="h-4 w-4 mr-1" />
                         PDF
                       </Button>
+                      {invoice.public_pdf_url && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleCopyLink(invoice)}
+                        >
+                          <Copy className="h-4 w-4 mr-1" />
+                          Copy Link
+                        </Button>
+                      )}
                       {invoice.payment_status !== 'PAID' && (
                         <Button
                           size="sm"

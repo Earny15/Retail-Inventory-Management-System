@@ -1,10 +1,10 @@
 import React, { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { usePermissions } from '../../hooks/usePermissions.jsx'
-import { useAuth } from '../../hooks/useAuth.simple.jsx'
+import { usePermissions } from '../../hooks/usePermissions'
+import { useAuth } from '../../hooks/useAuth'
 import { getInwardDetails, reverseInward } from '../../services/inwardService'
-import { PermissionGate } from '../../components/shared/PermissionGate'
+import PermissionGate from '../../components/shared/PermissionGate'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -147,7 +147,7 @@ export default function InwardDetailPage() {
                 <RefreshCcw className="h-4 w-4 mr-2" />
                 Try Again
               </Button>
-              <Button onClick={() => navigate('/inward/list')}>
+              <Button onClick={() => navigate('/inward')}>
                 <ArrowLeft className="h-4 w-4 mr-2" />
                 Back to List
               </Button>
@@ -159,19 +159,19 @@ export default function InwardDetailPage() {
   }
 
   const canReverseInward = inward.status === 'CONFIRMED' &&
-                           inward.transaction_type === 'INWARD' &&
+                           !inward.inward_number?.startsWith('REV-') &&
                            canEdit('vendor_inward')
 
   return (
     <div>
       <PageHeader
-        title={`Inward: ${inward.reference_no}`}
-        description={`${inward.transaction_type} transaction details`}
-        action={
+        title={`Inward: ${inward.inward_number}`}
+        description="Inward transaction details"
+        actions={
           <div className="flex space-x-2">
             <Button
               variant="outline"
-              onClick={() => navigate('/inward/list')}
+              onClick={() => navigate('/inward')}
             >
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to List
@@ -204,18 +204,14 @@ export default function InwardDetailPage() {
             </CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <div className="text-sm text-gray-600">Reference Number</div>
-                <div className="font-medium">{inward.reference_no}</div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-600">Transaction Type</div>
-                <div className="font-medium">{inward.transaction_type.replace('_', ' ')}</div>
+                <div className="text-sm text-gray-600">Inward Number</div>
+                <div className="font-medium">{inward.inward_number}</div>
               </div>
               <div>
                 <div className="text-sm text-gray-600">Date</div>
                 <div className="flex items-center">
                   <Calendar className="h-4 w-4 mr-1 text-gray-400" />
-                  {formatDate(inward.transaction_date)}
+                  {formatDate(inward.inward_date)}
                 </div>
               </div>
               <div>
@@ -289,16 +285,16 @@ export default function InwardDetailPage() {
                 <div className="font-medium">{formatCurrency(inward.subtotal || 0)}</div>
               </div>
               <div>
-                <div className="text-sm text-gray-600">GST Amount</div>
-                <div>{formatCurrency(inward.total_igst || 0)}</div>
+                <div className="text-sm text-gray-600">Tax Amount</div>
+                <div>{formatCurrency(inward.total_gst_amount || 0)}</div>
               </div>
               <div className="pt-2 border-t">
                 <div className="text-sm text-gray-600">Grand Total</div>
                 <div className={`text-xl font-bold ${
-                  inward.grand_total < 0 ? 'text-red-600' : 'text-green-600'
+                  inward.total_amount < 0 ? 'text-red-600' : 'text-green-600'
                 }`}>
-                  {formatCurrency(Math.abs(inward.grand_total || 0))}
-                  {inward.grand_total < 0 && (
+                  {formatCurrency(Math.abs(inward.total_amount || 0))}
+                  {inward.total_amount < 0 && (
                     <span className="text-sm block text-red-500">
                       (Reversed Amount)
                     </span>
@@ -307,34 +303,29 @@ export default function InwardDetailPage() {
               </div>
               <div>
                 <div className="text-sm text-gray-600">Items Count</div>
-                <div>{inward.transaction_items?.length || 0} items</div>
+                <div>{inward.vendor_inward_items?.length || 0} items</div>
               </div>
             </CardContent>
           </Card>
         </div>
 
         {/* Reversal Information */}
-        {(inward.status === 'REVERSED' || inward.reversal_reason) && (
+        {inward.status === 'REVERSED' && (
           <Card className="border-red-200 bg-red-50">
             <CardHeader>
               <CardTitle className="text-red-700 flex items-center">
                 <AlertTriangle className="h-5 w-5 mr-2" />
-                Reversal Information
+                This Inward Has Been Reversed
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {inward.reversal_reason && (
-                <div>
-                  <div className="text-sm text-red-600 font-medium">Reason for Reversal:</div>
-                  <div className="text-red-700">{inward.reversal_reason}</div>
-                </div>
-              )}
+              <p className="text-red-700">This inward transaction has been reversed. Inventory quantities have been adjusted accordingly.</p>
             </CardContent>
           </Card>
         )}
 
-        {/* Parent Transaction Info */}
-        {inward.parent_transaction_id && (
+        {/* Reversal Transaction Info */}
+        {inward.inward_number?.startsWith('REV-') && (
           <Card className="border-orange-200 bg-orange-50">
             <CardHeader>
               <CardTitle className="text-orange-700">
@@ -367,24 +358,22 @@ export default function InwardDetailPage() {
             <CardTitle>Line Items</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {inward.transaction_items && inward.transaction_items.length > 0 ? (
+            {inward.vendor_inward_items && inward.vendor_inward_items.length > 0 ? (
               <Table>
                 <TableHead>
                   <TableRow>
                     <TableHeader>#</TableHeader>
                     <TableHeader>SKU</TableHeader>
                     <TableHeader>Vendor Item Name</TableHeader>
-                    <TableHeader>Qty (Vendor)</TableHeader>
-                    <TableHeader>Qty (Internal)</TableHeader>
-                    <TableHeader>Rate (₹)</TableHeader>
+                    <TableHeader>Quantity</TableHeader>
+                    <TableHeader>Unit</TableHeader>
+                    <TableHeader>Rate</TableHeader>
                     <TableHeader>GST Rate</TableHeader>
-                    <TableHeader>Taxable Amount (₹)</TableHeader>
-                    <TableHeader>GST Amount (₹)</TableHeader>
-                    <TableHeader>Total (₹)</TableHeader>
+                    <TableHeader>Amount</TableHeader>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {inward.transaction_items.map((item, index) => (
+                  {inward.vendor_inward_items.map((item, index) => (
                     <TableRow key={item.id}>
                       <TableCell>{index + 1}</TableCell>
                       <TableCell>
@@ -401,39 +390,23 @@ export default function InwardDetailPage() {
                         {item.vendor_item_name || '-'}
                       </TableCell>
                       <TableCell>
-                        <div>
-                          <div>{Math.abs(item.quantity_vendor_unit || 0)}</div>
-                          <div className="text-xs text-gray-500">{item.vendor_unit}</div>
+                        <div className={item.quantity < 0 ? 'text-red-600' : ''}>
+                          {Math.abs(item.quantity || 0)}
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div>
-                          <div className={item.quantity < 0 ? 'text-red-600' : ''}>
-                            {Math.abs(item.quantity || 0)}
-                          </div>
-                          <div className="text-xs text-gray-500">{item.unit}</div>
-                        </div>
+                        {item.unit || item.skus?.unit_of_measure || '-'}
                       </TableCell>
                       <TableCell>
-                        {formatCurrency(item.buying_cost_per_unit || 0)}
+                        {formatCurrency(item.rate || 0)}
                       </TableCell>
                       <TableCell>
                         {item.gst_rate || 0}%
                       </TableCell>
-                      <TableCell>
-                        <span className={item.taxable_amount < 0 ? 'text-red-600' : ''}>
-                          {formatCurrency(Math.abs(item.taxable_amount || 0))}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        <span className={item.igst_amount < 0 ? 'text-red-600' : ''}>
-                          {formatCurrency(Math.abs(item.igst_amount || 0))}
-                        </span>
-                      </TableCell>
                       <TableCell className="font-medium">
-                        <span className={item.total_amount < 0 ? 'text-red-600' : ''}>
-                          {formatCurrency(Math.abs(item.total_amount || 0))}
-                          {item.total_amount < 0 && (
+                        <span className={item.amount < 0 ? 'text-red-600' : ''}>
+                          {formatCurrency(Math.abs(item.amount || 0))}
+                          {item.amount < 0 && (
                             <span className="text-xs block text-red-500">(Reversed)</span>
                           )}
                         </span>

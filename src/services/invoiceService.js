@@ -1,6 +1,7 @@
 import supabase from './supabase'
 import { calculateGST, calculateRoundOff } from '../utils/gstCalculations'
 import { generateSequentialNumber } from '../utils/sequentialNumbers'
+import { uploadInvoicePDFToStorage } from './invoicePdfService'
 
 // Get invoice list with filters
 export async function getInvoiceList(filters = {}) {
@@ -128,7 +129,7 @@ export async function createInvoice(invoiceData) {
       }))
 
       const { error: itemsError } = await supabase
-        .from('invoice_items')
+        .from('customer_invoice_items')
         .insert(itemsToInsert)
 
       if (itemsError) throw itemsError
@@ -137,6 +138,23 @@ export async function createInvoice(invoiceData) {
       if (invoiceData.status === 'CONFIRMED') {
         await updateInventoryForInvoice(invoice.id, 'OUTWARD')
       }
+    }
+
+    // Generate and upload PDF for public access
+    try {
+      const fullInvoice = await getInvoiceById(invoice.id)
+      const publicPdfUrl = await uploadInvoicePDFToStorage(fullInvoice)
+
+      // Update invoice with public PDF URL
+      await supabase
+        .from('customer_invoices')
+        .update({ public_pdf_url: publicPdfUrl })
+        .eq('id', invoice.id)
+
+      invoice.public_pdf_url = publicPdfUrl
+    } catch (pdfError) {
+      console.error('Error generating/uploading PDF:', pdfError)
+      // Don't fail the invoice creation if PDF upload fails
     }
 
     return invoice
@@ -193,7 +211,7 @@ export async function deleteInvoice(id) {
 
     // Delete invoice items first
     await supabase
-      .from('invoice_items')
+      .from('customer_invoice_items')
       .delete()
       .eq('invoice_id', id)
 
@@ -482,7 +500,7 @@ function getDaysOverdue(invoice) {
 async function updateInventoryForInvoice(invoiceId, direction) {
   try {
     const { data: items } = await supabase
-      .from('invoice_items')
+      .from('customer_invoice_items')
       .select('sku_id, quantity')
       .eq('invoice_id', invoiceId)
 

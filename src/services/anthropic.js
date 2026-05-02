@@ -13,10 +13,12 @@ export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendo
     throw new Error('Anthropic API key is not configured. Set VITE_ANTHROPIC_API_KEY in .env')
   }
 
-  // Only image types are supported for vision - PDF must be converted first
-  const supportedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-  if (!supportedTypes.includes(mimeType)) {
-    throw new Error(`Unsupported file type: ${mimeType}. Please upload a JPG, PNG, or WebP image.`)
+  const supportedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  const isPdf = mimeType === 'application/pdf'
+  const isImage = supportedImageTypes.includes(mimeType)
+
+  if (!isImage && !isPdf) {
+    throw new Error(`Unsupported file type: ${mimeType}. Please upload a JPG, PNG, WebP image, or PDF.`)
   }
 
   try {
@@ -50,7 +52,7 @@ export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendo
           role: 'user',
           content: [
             {
-              type: 'image',
+              type: isPdf ? 'document' : 'image',
               source: {
                 type: 'base64',
                 media_type: mimeType,

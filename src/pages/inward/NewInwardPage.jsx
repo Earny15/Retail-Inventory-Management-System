@@ -191,9 +191,9 @@ export default function NewInwardPage() {
     const file = event.target.files?.[0]
     if (!file) return
 
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf']
     if (!allowedTypes.includes(file.type)) {
-      toast.error('Please upload a JPG, PNG, or WebP image')
+      toast.error('Please upload a JPG, PNG, WebP image, or PDF')
       return
     }
     if (file.size > 10 * 1024 * 1024) {
@@ -492,11 +492,11 @@ export default function NewInwardPage() {
                   Upload or capture your invoice
                 </p>
                 <p className="text-sm text-gray-500 mb-4">
-                  Supports JPG, PNG, WebP up to 10MB
+                  Supports JPG, PNG, WebP, PDF up to 10MB
                 </p>
                 <input
                   type="file"
-                  accept="image/jpeg,image/jpg,image/png,image/webp"
+                  accept="image/jpeg,image/jpg,image/png,image/webp,application/pdf"
                   onChange={handleFileUpload}
                   className="hidden"
                   id="invoice-upload"
@@ -553,11 +553,19 @@ export default function NewInwardPage() {
               {filePreview && (
                 <div className="mt-4">
                   <p className="text-sm font-medium text-gray-700 mb-2">Preview:</p>
-                  <img
-                    src={filePreview}
-                    alt="Invoice preview"
-                    className="max-w-full max-h-64 object-contain border rounded-lg mx-auto"
-                  />
+                  {uploadedFile?.type === 'application/pdf' ? (
+                    <embed
+                      src={filePreview}
+                      type="application/pdf"
+                      className="w-full h-64 border rounded-lg"
+                    />
+                  ) : (
+                    <img
+                      src={filePreview}
+                      alt="Invoice preview"
+                      className="max-w-full max-h-64 object-contain border rounded-lg mx-auto"
+                    />
+                  )}
                 </div>
               )}
             </div>

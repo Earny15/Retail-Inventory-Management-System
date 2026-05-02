@@ -44,7 +44,7 @@ export async function extractVendorInvoice(imageBase64, mimeType, skuList, vendo
         'anthropic-dangerous-direct-browser-access': 'true'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6-20250620',
+        model: 'claude-opus-4-7',
         max_tokens: 4096,
         messages: [{
           role: 'user',

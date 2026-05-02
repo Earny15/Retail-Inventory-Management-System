@@ -94,6 +94,12 @@ Extract and return a JSON object with this exact structure (return ONLY valid JS
   ]
 }
 
+Quantity extraction rules (IMPORTANT):
+1. ALWAYS prefer the quantity in PIECES (PCS / NOS / NUMBERS / count) when the invoice shows it.
+2. Many invoices show multiple quantity columns per line (e.g. PCS and KGS, or PCS and MTR). In that case, set "quantity" to the PCS/NOS value and set "unit" to "PCS".
+3. Only fall back to weight/length units (KGS, MTR, FT, SQM, etc.) if the invoice does NOT show a piece/number count for that line.
+4. If you fall back, set "unit" to the actual unit shown on the invoice.
+
 Matching rules:
 1. First check vendor aliases - if vendor_item_name matches an alias exactly, use that SKU (confidence: 100, method: "alias")
 2. Otherwise use semantic similarity - aluminium product names, sizes, types

@@ -184,7 +184,7 @@ export default function NewInvoicePage() {
   const skuOptions = useMemo(() =>
     skus.map(s => ({
       value: s.id,
-      label: `${s.sku_code} - ${s.sku_name}`
+      label: s.sku_name
     })),
     [skus]
   )
@@ -1158,7 +1158,7 @@ export default function NewInvoicePage() {
                             className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg hover:border-navy-400 hover:bg-navy-50 transition flex items-center justify-between gap-2"
                           >
                             <span className="text-sm text-gray-900 truncate">
-                              {c.sku.sku_code} — {c.sku.sku_name}
+                              {c.sku.sku_name}
                             </span>
                             <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
                               c.confidence >= 70 ? 'bg-green-100 text-green-700' :

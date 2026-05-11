@@ -177,7 +177,7 @@ export async function extractInvoiceItemsFromVoice(transcript, skuList) {
 The user dictated this (auto-transcribed, may have errors):
 "${transcript}"
 
-Match each item they mentioned to the SKU catalogue below.
+For each distinct item the user mentioned, return up to 3 candidate SKUs from the catalogue, ranked by likelihood.
 
 SKU CATALOGUE:
 ${JSON.stringify(skuListCompact)}
@@ -186,11 +186,11 @@ Return ONLY a JSON object (no markdown, no commentary):
 {
   "items": [
     {
-      "matched_sku_id": "UUID from catalogue or null",
-      "matched_sku_name": "internal SKU name or null",
+      "heard_as": "verbatim phrase from transcript (e.g. 'aluminium pipe')",
       "quantity": number (default 1 if not stated),
-      "confidence": number between 0-100,
-      "heard_as": "verbatim phrase from transcript"
+      "candidates": [
+        { "sku_id": "UUID from catalogue", "sku_name": "internal SKU name", "confidence": 0-100 }
+      ]
     }
   ]
 }
@@ -199,9 +199,15 @@ Rules:
 - One entry per distinct item mentioned. Order matches the order spoken.
 - "PCS", "pieces", "nos", "numbers", "pcs", "pc" all mean pieces.
 - If a quantity is mentioned (e.g. "10 pieces of X", "five X"), set quantity to that number. Otherwise default to 1.
-- Use semantic matching on aluminium product names, sizes, types. Be liberal with matches when product names sound similar to a SKU.
-- Set confidence 80-100 for clear matches, 50-79 for plausible, below 50 if unsure.
-- If you genuinely cannot match an item, still include the entry with matched_sku_id=null so the user knows you heard it.`
+- candidates: ALWAYS include up to 3 plausible SKUs from the catalogue, ranked by confidence (highest first).
+- Confidence scoring:
+  * 90-100 = unmistakable single match
+  * 70-89  = strong match but other SKUs are similar
+  * 40-69  = partial match (e.g. user said only part of the name)
+  * 1-39   = weak guess
+- Be liberal with candidates — if the user said only part of a SKU name (e.g. "channel" when several channel SKUs exist), include the top 3 most likely so the user can pick.
+- Use semantic matching on aluminium product names, sizes, types.
+- If you genuinely cannot find any plausible match, return candidates: [] for that item.`
       }]
     })
   })

@@ -92,7 +92,12 @@ export default function NewInvoicePage() {
   const [isListening, setIsListening] = useState(false)
   const [isProcessingVoice, setIsProcessingVoice] = useState(false)
   const [voiceTranscript, setVoiceTranscript] = useState('')
+  // Items the AI heard but couldn't auto-pick; user disambiguates inline
+  const [pendingMatches, setPendingMatches] = useState([])
   const recognitionRef = useRef(null)
+
+  // Confidence threshold: top candidate >= this number is auto-added
+  const AUTO_MATCH_THRESHOLD = 85
 
   // Fetch customers
   const { data: customers = [] } = useQuery({
@@ -257,19 +262,42 @@ export default function NewInvoicePage() {
     }
   }
 
-  // Build a line item from a matched voice result
-  const buildItemFromMatch = (match, gstRateForItem) => ({
+  // Build a line item from a chosen SKU
+  const buildItemFromSku = (sku, qty, gstRateForItem) => ({
     id: Date.now() + Math.floor(Math.random() * 1000),
-    sku_id: match.sku.id,
-    hsn_code: match.sku.hsn_code || '',
-    qty: Math.max(1, Number(match.quantity) || 1),
-    unit: match.sku.unit_of_measure || '',
-    sellingPrice: match.sku.selling_price || 0,
+    sku_id: sku.id,
+    hsn_code: sku.hsn_code || '',
+    qty: Math.max(1, Number(qty) || 1),
+    unit: sku.unit_of_measure || '',
+    sellingPrice: sku.selling_price || 0,
     gst_rate: gstRateForItem,
     included: true
   })
 
-  // Process the recognized speech: match SKUs via Claude, add as line items
+  // Add new line items, optionally filling the first empty slot. Returns the id of the last added/updated item.
+  const appendItemsToInvoice = (newItems) => {
+    let lastId = null
+    setLineItems(prev => {
+      const firstEmptyIdx = prev.findIndex(i => !i.sku_id)
+      const toAdd = [...newItems]
+      if (firstEmptyIdx >= 0 && toAdd.length > 0) {
+        const updated = [...prev]
+        const first = toAdd.shift()
+        updated[firstEmptyIdx] = { ...first, id: prev[firstEmptyIdx].id }
+        lastId = prev[firstEmptyIdx].id
+        if (toAdd.length === 0) return updated
+        lastId = toAdd[toAdd.length - 1].id
+        return [...updated, ...toAdd]
+      }
+      if (toAdd.length === 0) return prev
+      lastId = toAdd[toAdd.length - 1].id
+      return [...prev, ...toAdd]
+    })
+    return lastId
+  }
+
+  // Process the recognized speech: match SKUs via Claude, auto-add high-confidence matches,
+  // queue ambiguous ones for the user to disambiguate.
   const processVoiceTranscript = async (transcript) => {
     setIsProcessingVoice(true)
     try {
@@ -280,55 +308,58 @@ export default function NewInvoicePage() {
         return
       }
 
-      const matched = items
-        .map(it => ({
-          ...it,
-          sku: skus.find(s => s.id === it.matched_sku_id)
-        }))
-        .filter(it => it.sku)
+      const gstRate = gstMode === 'same' ? uniformGstRate : 18
+      const autoAddItems = []
+      const ambiguous = []
+      const unrecognized = []
 
-      const unmatched = items.filter(it => !it.matched_sku_id)
+      for (const it of items) {
+        const candidates = (it.candidates || [])
+          .map(c => ({ ...c, sku: skus.find(s => s.id === c.sku_id) }))
+          .filter(c => c.sku)
 
-      if (matched.length === 0) {
-        toast.error(`Heard: "${transcript}". No SKU matched — try again or add manually.`)
-        return
-      }
-
-      // Decide whether the first empty line item should be filled, or we append new ones.
-      // Fill the first empty SKU slot with the first match, then append the rest.
-      const newItems = matched.map(m =>
-        buildItemFromMatch(m, gstMode === 'same' ? uniformGstRate : 18)
-      )
-
-      let lastNewId = null
-      setLineItems(prev => {
-        const firstEmptyIdx = prev.findIndex(i => !i.sku_id)
-        if (firstEmptyIdx >= 0) {
-          // Replace the empty slot's SKU with the first match (keep its id so refs work)
-          const updated = [...prev]
-          const first = newItems.shift()
-          updated[firstEmptyIdx] = { ...first, id: prev[firstEmptyIdx].id }
-          lastNewId = prev[firstEmptyIdx].id
-          if (newItems.length) {
-            lastNewId = newItems[newItems.length - 1].id
-            return [...updated, ...newItems]
-          }
-          return updated
+        if (candidates.length === 0) {
+          unrecognized.push(it.heard_as)
+          continue
         }
-        lastNewId = newItems[newItems.length - 1].id
-        return [...prev, ...newItems]
-      })
 
-      if (lastNewId) {
-        setExpandedItemId(lastNewId)
-        scrollToItem(lastNewId)
+        const top = candidates[0]
+        if (top.confidence >= AUTO_MATCH_THRESHOLD && candidates.length === 1) {
+          autoAddItems.push(buildItemFromSku(top.sku, it.quantity, gstRate))
+        } else if (top.confidence >= AUTO_MATCH_THRESHOLD) {
+          // Top is strong but others exist — still auto-pick top
+          autoAddItems.push(buildItemFromSku(top.sku, it.quantity, gstRate))
+        } else {
+          // Ambiguous — queue for user to pick
+          ambiguous.push({
+            id: `pending-${Date.now()}-${ambiguous.length}`,
+            heard_as: it.heard_as,
+            quantity: it.quantity || 1,
+            candidates: candidates.slice(0, 3)
+          })
+        }
       }
 
-      if (unmatched.length > 0) {
-        toast.success(`Added ${matched.length}. ${unmatched.length} couldn't be matched.`)
-      } else {
-        toast.success(`Added ${matched.length} item${matched.length > 1 ? 's' : ''}`)
+      // Add auto-matched items immediately
+      if (autoAddItems.length > 0) {
+        const lastId = appendItemsToInvoice(autoAddItems)
+        if (lastId) {
+          setExpandedItemId(lastId)
+          scrollToItem(lastId)
+        }
       }
+
+      // Queue ambiguous matches for user to disambiguate
+      if (ambiguous.length > 0) {
+        setPendingMatches(prev => [...prev, ...ambiguous])
+      }
+
+      const parts = []
+      if (autoAddItems.length) parts.push(`Added ${autoAddItems.length}`)
+      if (ambiguous.length) parts.push(`${ambiguous.length} to confirm`)
+      if (unrecognized.length) parts.push(`${unrecognized.length} not recognized`)
+      if (parts.length) toast.success(parts.join(' · '))
+
     } catch (err) {
       console.error('Voice processing failed:', err)
       toast.error(`Voice processing failed: ${err.message}`)
@@ -336,6 +367,24 @@ export default function NewInvoicePage() {
       setIsProcessingVoice(false)
       setVoiceTranscript('')
     }
+  }
+
+  // User picked a candidate for an ambiguous match
+  const resolvePendingMatch = (pendingId, sku) => {
+    const pending = pendingMatches.find(p => p.id === pendingId)
+    if (!pending) return
+    const gstRate = gstMode === 'same' ? uniformGstRate : 18
+    const newItem = buildItemFromSku(sku, pending.quantity, gstRate)
+    const lastId = appendItemsToInvoice([newItem])
+    setPendingMatches(prev => prev.filter(p => p.id !== pendingId))
+    if (lastId) {
+      setExpandedItemId(lastId)
+      scrollToItem(lastId)
+    }
+  }
+
+  const dismissPendingMatch = (pendingId) => {
+    setPendingMatches(prev => prev.filter(p => p.id !== pendingId))
   }
 
   // Start voice dictation
@@ -739,11 +788,17 @@ export default function NewInvoicePage() {
                     const stock = inventoryMap[item.sku_id] || 0
                     const qtyExceedsStock = item.included && item.sku_id && item.qty > stock
 
+                    const rowAlt = !item.included
+                      ? 'bg-gray-100 opacity-60'
+                      : index % 2 === 0
+                        ? 'bg-white'
+                        : 'bg-blue-50/40'
+
                     return (
                       <TableRow
                         key={item.id}
                         ref={(el) => { if (el) itemRefs.current[item.id] = el }}
-                        className={!item.included ? 'bg-gray-100 opacity-60' : ''}
+                        className={rowAlt}
                       >
                         <TableCell>{index + 1}</TableCell>
                         <TableCell className="min-w-[250px]">
@@ -845,11 +900,17 @@ export default function NewInvoicePage() {
                 const skuLabel = skuOptions.find(o => o.value === item.sku_id)?.label
                 const summaryName = skuLabel || 'No SKU selected'
 
+                const altBg = !item.included
+                  ? 'bg-gray-100 opacity-60 border-gray-200'
+                  : index % 2 === 0
+                    ? 'bg-white border-gray-200 shadow-sm'
+                    : 'bg-blue-50/50 border-blue-100 shadow-sm'
+
                 return (
                   <div
                     key={item.id}
                     ref={(el) => { if (el) itemRefs.current[item.id] = el }}
-                    className={`border rounded-xl ${!item.included ? 'bg-gray-100 opacity-60 border-gray-200' : 'bg-white border-gray-200 shadow-sm'}`}
+                    className={`border rounded-xl ${altBg}`}
                   >
                     {/* Collapsed summary header — always visible, tap to toggle */}
                     <button
@@ -1047,6 +1108,62 @@ export default function NewInvoicePage() {
                   <p className="text-sm text-gray-800 italic">
                     {voiceTranscript || (isListening ? 'Start speaking — e.g. "10 pieces of aluminium pipe, 5 numbers of L-bracket"' : '')}
                   </p>
+                </div>
+              )}
+
+              {/* Ambiguous voice matches — let the user pick from candidates */}
+              {pendingMatches.length > 0 && (
+                <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-amber-900">
+                      Confirm which SKU you meant:
+                    </p>
+                    <span className="text-xs text-amber-700">{pendingMatches.length} to confirm</span>
+                  </div>
+                  {pendingMatches.map(pending => (
+                    <div key={pending.id} className="bg-white rounded-lg border border-amber-200 p-3">
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div>
+                          <p className="text-xs text-gray-500">You said</p>
+                          <p className="text-sm font-medium text-gray-900">
+                            "{pending.heard_as}"
+                            {pending.quantity > 1 && (
+                              <span className="ml-2 text-xs text-gray-500">qty: {pending.quantity}</span>
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => dismissPendingMatch(pending.id)}
+                          className="text-xs text-gray-400 hover:text-gray-600"
+                        >
+                          Skip
+                        </button>
+                      </div>
+                      <p className="text-xs text-gray-500 mb-1.5">Pick the correct SKU:</p>
+                      <div className="space-y-1.5">
+                        {pending.candidates.map(c => (
+                          <button
+                            key={c.sku_id}
+                            type="button"
+                            onClick={() => resolvePendingMatch(pending.id, c.sku)}
+                            className="w-full text-left px-3 py-2 border border-gray-200 rounded-lg hover:border-navy-400 hover:bg-navy-50 transition flex items-center justify-between gap-2"
+                          >
+                            <span className="text-sm text-gray-900 truncate">
+                              {c.sku.sku_code} — {c.sku.sku_name}
+                            </span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
+                              c.confidence >= 70 ? 'bg-green-100 text-green-700' :
+                              c.confidence >= 40 ? 'bg-amber-100 text-amber-700' :
+                              'bg-gray-100 text-gray-600'
+                            }`}>
+                              {c.confidence}%
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

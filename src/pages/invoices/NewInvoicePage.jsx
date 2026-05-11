@@ -389,17 +389,27 @@ export default function NewInvoicePage() {
 
   // Start voice dictation
   const startVoiceCapture = () => {
+    console.log('[voice] startVoiceCapture called', {
+      hasSpeechRecognition: !!(window.SpeechRecognition || window.webkitSpeechRecognition),
+      selectedCustomerId,
+      skuCount: skus.length,
+      isSecureContext: typeof window !== 'undefined' && window.isSecureContext
+    })
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
-      toast.error('Voice dictation needs Chrome or Safari on a recent device.')
+      toast.error('Voice not supported on this browser. Use Chrome (Android/Desktop) or Safari (iOS 14.5+).')
+      return
+    }
+    if (typeof window !== 'undefined' && !window.isSecureContext) {
+      toast.error('Voice needs HTTPS. Open the deployed site, not a local file.')
       return
     }
     if (!selectedCustomerId) {
-      toast.error('Please select a customer first')
+      toast('Please select a customer first', { icon: '👆' })
       return
     }
     if (skus.length === 0) {
-      toast.error('SKU catalogue not loaded yet')
+      toast.error('SKU list is still loading — try again in a second.')
       return
     }
 
@@ -1068,17 +1078,15 @@ export default function NewInvoicePage() {
                 <button
                   type="button"
                   onClick={toggleVoice}
-                  disabled={isProcessingVoice || !selectedCustomerId}
+                  disabled={isProcessingVoice}
                   className={`w-full py-3 rounded-xl flex items-center justify-center font-medium transition ${
                     isListening
                       ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse'
                       : isProcessingVoice
                         ? 'bg-gray-200 text-gray-500'
-                        : !selectedCustomerId
-                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                          : 'bg-navy-700 text-white hover:bg-navy-800'
+                        : 'bg-navy-700 text-white hover:bg-navy-800'
                   }`}
-                  title={!selectedCustomerId ? 'Select a customer first' : 'Tap to dictate items'}
+                  title="Tap to dictate items"
                 >
                   {isProcessingVoice ? (
                     <>

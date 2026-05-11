@@ -24,11 +24,12 @@ const TableBody = ({ className = '', children, ...props }) => (
   </tbody>
 )
 
-const TableRow = ({ className = '', children, ...props }) => (
-  <tr className={`hover:bg-gray-50 ${className}`} {...props}>
+const TableRow = forwardRef(({ className = '', children, ...props }, ref) => (
+  <tr ref={ref} className={`hover:bg-gray-50 ${className}`} {...props}>
     {children}
   </tr>
-)
+))
+TableRow.displayName = 'TableRow'
 
 const TableHeader = ({ className = '', children, ...props }) => (
   <th

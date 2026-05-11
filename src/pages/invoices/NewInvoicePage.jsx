@@ -1,9 +1,10 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../../services/supabase'
 import { useAuth } from '../../hooks/useAuth'
 import { currencyToWords } from '../../utils/numberToWords'
+import { extractInvoiceItemsFromVoice } from '../../services/anthropic'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -16,7 +17,12 @@ import {
   Plus,
   Trash2,
   AlertCircle,
-  CheckCircle
+  CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  Mic,
+  MicOff,
+  Loader2
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -72,10 +78,21 @@ export default function NewInvoicePage() {
   const [gstMode, setGstMode] = useState('same') // same = uniform GST%, different = per-line
   const [uniformGstRate, setUniformGstRate] = useState(18) // used when gstMode === 'same'
 
+  const initialItemId = useRef(Date.now()).current
   const [lineItems, setLineItems] = useState([
-    { id: Date.now(), sku_id: null, hsn_code: '', qty: 1, unit: '', sellingPrice: 0, gst_rate: 18, included: true }
+    { id: initialItemId, sku_id: null, hsn_code: '', qty: 1, unit: '', sellingPrice: 0, gst_rate: 18, included: true }
   ])
   const [isSubmitting, setIsSubmitting] = useState(false)
+
+  // Accordion: only one mobile card expanded at a time. Latest-added is auto-expanded.
+  const [expandedItemId, setExpandedItemId] = useState(initialItemId)
+  const itemRefs = useRef({})
+
+  // Voice dictation state
+  const [isListening, setIsListening] = useState(false)
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false)
+  const [voiceTranscript, setVoiceTranscript] = useState('')
+  const recognitionRef = useRef(null)
 
   // Fetch customers
   const { data: customers = [] } = useQuery({
@@ -167,10 +184,19 @@ export default function NewInvoicePage() {
     [skus]
   )
 
+  // Scroll a line item into view (used after adding new items)
+  const scrollToItem = (itemId) => {
+    setTimeout(() => {
+      const el = itemRefs.current[itemId]
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+  }
+
   // Line item handlers
   const addLineItem = () => {
+    const newId = Date.now()
     setLineItems(prev => [...prev, {
-      id: Date.now(),
+      id: newId,
       sku_id: null,
       hsn_code: '',
       qty: 1,
@@ -179,6 +205,9 @@ export default function NewInvoicePage() {
       gst_rate: uniformGstRate,
       included: true
     }])
+    setExpandedItemId(newId)
+    scrollToItem(newId)
+    return newId
   }
 
   const removeLineItem = (index) => {
@@ -227,6 +256,166 @@ export default function NewInvoicePage() {
       setLineItems(prev => prev.map(item => ({ ...item, gst_rate: uniformGstRate })))
     }
   }
+
+  // Build a line item from a matched voice result
+  const buildItemFromMatch = (match, gstRateForItem) => ({
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    sku_id: match.sku.id,
+    hsn_code: match.sku.hsn_code || '',
+    qty: Math.max(1, Number(match.quantity) || 1),
+    unit: match.sku.unit_of_measure || '',
+    sellingPrice: match.sku.selling_price || 0,
+    gst_rate: gstRateForItem,
+    included: true
+  })
+
+  // Process the recognized speech: match SKUs via Claude, add as line items
+  const processVoiceTranscript = async (transcript) => {
+    setIsProcessingVoice(true)
+    try {
+      const result = await extractInvoiceItemsFromVoice(transcript, skus)
+      const items = result.items || []
+      if (items.length === 0) {
+        toast.error("Couldn't recognize any items. Try again.")
+        return
+      }
+
+      const matched = items
+        .map(it => ({
+          ...it,
+          sku: skus.find(s => s.id === it.matched_sku_id)
+        }))
+        .filter(it => it.sku)
+
+      const unmatched = items.filter(it => !it.matched_sku_id)
+
+      if (matched.length === 0) {
+        toast.error(`Heard: "${transcript}". No SKU matched — try again or add manually.`)
+        return
+      }
+
+      // Decide whether the first empty line item should be filled, or we append new ones.
+      // Fill the first empty SKU slot with the first match, then append the rest.
+      const newItems = matched.map(m =>
+        buildItemFromMatch(m, gstMode === 'same' ? uniformGstRate : 18)
+      )
+
+      let lastNewId = null
+      setLineItems(prev => {
+        const firstEmptyIdx = prev.findIndex(i => !i.sku_id)
+        if (firstEmptyIdx >= 0) {
+          // Replace the empty slot's SKU with the first match (keep its id so refs work)
+          const updated = [...prev]
+          const first = newItems.shift()
+          updated[firstEmptyIdx] = { ...first, id: prev[firstEmptyIdx].id }
+          lastNewId = prev[firstEmptyIdx].id
+          if (newItems.length) {
+            lastNewId = newItems[newItems.length - 1].id
+            return [...updated, ...newItems]
+          }
+          return updated
+        }
+        lastNewId = newItems[newItems.length - 1].id
+        return [...prev, ...newItems]
+      })
+
+      if (lastNewId) {
+        setExpandedItemId(lastNewId)
+        scrollToItem(lastNewId)
+      }
+
+      if (unmatched.length > 0) {
+        toast.success(`Added ${matched.length}. ${unmatched.length} couldn't be matched.`)
+      } else {
+        toast.success(`Added ${matched.length} item${matched.length > 1 ? 's' : ''}`)
+      }
+    } catch (err) {
+      console.error('Voice processing failed:', err)
+      toast.error(`Voice processing failed: ${err.message}`)
+    } finally {
+      setIsProcessingVoice(false)
+      setVoiceTranscript('')
+    }
+  }
+
+  // Start voice dictation
+  const startVoiceCapture = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      toast.error('Voice dictation needs Chrome or Safari on a recent device.')
+      return
+    }
+    if (!selectedCustomerId) {
+      toast.error('Please select a customer first')
+      return
+    }
+    if (skus.length === 0) {
+      toast.error('SKU catalogue not loaded yet')
+      return
+    }
+
+    const recognition = new SpeechRecognition()
+    recognition.lang = 'en-IN'
+    recognition.interimResults = true
+    recognition.continuous = true
+    recognition.maxAlternatives = 1
+
+    let finalText = ''
+
+    recognition.onresult = (event) => {
+      let interim = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript
+        if (event.results[i].isFinal) finalText += t + ' '
+        else interim += t
+      }
+      setVoiceTranscript((finalText + interim).trim())
+    }
+
+    recognition.onerror = (event) => {
+      setIsListening(false)
+      if (event.error === 'no-speech') {
+        toast.error('No speech detected. Tap mic and try again.')
+      } else if (event.error === 'not-allowed') {
+        toast.error('Microphone permission denied. Allow it in your browser.')
+      } else if (event.error !== 'aborted') {
+        toast.error(`Voice error: ${event.error}`)
+      }
+    }
+
+    recognition.onend = () => {
+      setIsListening(false)
+      const transcript = finalText.trim() || voiceTranscript.trim()
+      if (transcript) {
+        processVoiceTranscript(transcript)
+      }
+    }
+
+    recognition.start()
+    setIsListening(true)
+    setVoiceTranscript('')
+    recognitionRef.current = recognition
+  }
+
+  const stopVoiceCapture = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+    }
+  }
+
+  const toggleVoice = () => {
+    if (isListening) stopVoiceCapture()
+    else startVoiceCapture()
+  }
+
+  // Cleanup recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.abort() } catch {}
+      }
+    }
+  }, [])
 
   // Calculations per line item
   // Selling price is GST-INCLUSIVE. Taxable amount is back-calculated.
@@ -551,7 +740,11 @@ export default function NewInvoicePage() {
                     const qtyExceedsStock = item.included && item.sku_id && item.qty > stock
 
                     return (
-                      <TableRow key={item.id} className={!item.included ? 'bg-gray-100 opacity-60' : ''}>
+                      <TableRow
+                        key={item.id}
+                        ref={(el) => { if (el) itemRefs.current[item.id] = el }}
+                        className={!item.included ? 'bg-gray-100 opacity-60' : ''}
+                      >
                         <TableCell>{index + 1}</TableCell>
                         <TableCell className="min-w-[250px]">
                           <Select
@@ -643,136 +836,219 @@ export default function NewInvoicePage() {
             </div>
 
             {/* Mobile Cards */}
-            <div className="lg:hidden space-y-4">
+            <div className="lg:hidden space-y-3">
               {lineItems.map((item, index) => {
                 const calc = calcLineItem(item)
                 const stock = inventoryMap[item.sku_id] || 0
                 const qtyExceedsStock = item.included && item.sku_id && item.qty > stock
+                const isExpanded = expandedItemId === item.id
+                const skuLabel = skuOptions.find(o => o.value === item.sku_id)?.label
+                const summaryName = skuLabel || 'No SKU selected'
 
                 return (
                   <div
                     key={item.id}
-                    className={`border rounded-xl p-4 space-y-3 ${!item.included ? 'bg-gray-100 opacity-60 border-gray-200' : index % 2 === 0 ? 'bg-white border-gray-200 shadow-sm' : 'bg-blue-50/40 border-blue-100 shadow-sm'}`}
+                    ref={(el) => { if (el) itemRefs.current[item.id] = el }}
+                    className={`border rounded-xl ${!item.included ? 'bg-gray-100 opacity-60 border-gray-200' : 'bg-white border-gray-200 shadow-sm'}`}
                   >
-                    {/* Card Header */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-gray-500">Item #{index + 1}</span>
-                      <div className="flex items-center gap-2">
-                        <label className="flex items-center gap-1.5 text-sm text-gray-600">
-                          <input
-                            type="checkbox"
-                            checked={item.included}
-                            onChange={(e) => updateLineItem(index, 'included', e.target.checked)}
-                            className="h-4 w-4 text-navy-600 rounded"
-                          />
-                          Include
-                        </label>
-                        {lineItems.length > 1 && (
-                          <button
-                            onClick={() => removeLineItem(index)}
-                            className="p-1.5 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                    {/* Collapsed summary header — always visible, tap to toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setExpandedItemId(isExpanded ? null : item.id)}
+                      className="w-full flex items-center justify-between gap-3 p-3 text-left"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-gray-500">#{index + 1}</span>
+                          <span className={`text-sm font-medium truncate ${item.sku_id ? 'text-gray-900' : 'text-gray-400 italic'}`}>
+                            {summaryName}
+                          </span>
+                        </div>
+                        {item.sku_id && (
+                          <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
+                            <span>{item.qty} {item.unit || ''}</span>
+                            <span>×</span>
+                            <span>{formatCurrency(item.sellingPrice)}</span>
+                            <span className="ml-auto font-semibold text-navy-600">{formatCurrency(calc.total)}</span>
+                          </div>
                         )}
                       </div>
-                    </div>
+                      {isExpanded
+                        ? <ChevronUp className="h-5 w-5 text-gray-400 flex-shrink-0" />
+                        : <ChevronDown className="h-5 w-5 text-gray-400 flex-shrink-0" />}
+                    </button>
 
-                    {/* SKU Select */}
-                    <Select
-                      label="SKU"
-                      options={skuOptions}
-                      value={skuOptions.find(o => o.value === item.sku_id) || null}
-                      onChange={(selected) => handleSkuSelect(index, selected?.value)}
-                      placeholder="Select SKU..."
-                    />
+                    {/* Expanded body */}
+                    {isExpanded && (
+                      <div className="px-3 pb-3 space-y-3 border-t border-gray-100">
+                        <div className="flex items-center justify-between pt-3">
+                          <label className="flex items-center gap-1.5 text-sm text-gray-600">
+                            <input
+                              type="checkbox"
+                              checked={item.included}
+                              onChange={(e) => updateLineItem(index, 'included', e.target.checked)}
+                              className="h-4 w-4 text-navy-600 rounded"
+                            />
+                            Include in invoice
+                          </label>
+                          {lineItems.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => removeLineItem(index)}
+                              className="p-1.5 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-lg"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
 
-                    {/* HSN & Unit row */}
-                    {(item.hsn_code || item.unit) && (
-                      <div className="flex gap-4 text-sm text-gray-500">
-                        {item.hsn_code && <span>HSN: {item.hsn_code}</span>}
-                        {item.unit && <span>Unit: {item.unit}</span>}
+                        <Select
+                          label="SKU"
+                          options={skuOptions}
+                          value={skuOptions.find(o => o.value === item.sku_id) || null}
+                          onChange={(selected) => handleSkuSelect(index, selected?.value)}
+                          placeholder="Select SKU..."
+                        />
+
+                        {(item.hsn_code || item.unit) && (
+                          <div className="flex gap-4 text-sm text-gray-500">
+                            {item.hsn_code && <span>HSN: {item.hsn_code}</span>}
+                            {item.unit && <span>Unit: {item.unit}</span>}
+                          </div>
+                        )}
+
+                        <div className={`grid gap-3 ${gstMode === 'different' ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-500 mb-1">Qty</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.qty}
+                              onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
+                            />
+                            {qtyExceedsStock && (
+                              <div className="flex items-center mt-1 text-xs text-amber-600">
+                                <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
+                                Stock: {stock}
+                              </div>
+                            )}
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-500 mb-1">Price (Incl. GST)</label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.sellingPrice}
+                              onChange={(e) => updateLineItem(index, 'sellingPrice', parseFloat(e.target.value) || 0)}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
+                            />
+                          </div>
+                          {gstMode === 'different' && (
+                            <div>
+                              <label className="block text-xs font-medium text-gray-500 mb-1">GST %</label>
+                              <Select
+                                options={GST_RATE_OPTIONS}
+                                value={GST_RATE_OPTIONS.find(o => o.value === item.gst_rate) || null}
+                                onChange={(selected) => updateLineItem(index, 'gst_rate', selected?.value ?? 18)}
+                                menuPortalTarget={document.body}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-500">Taxable Amt</span>
+                            <span>{formatCurrency(calc.taxableAmount)}</span>
+                          </div>
+                          {gstType === 'INTRA' ? (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-500">CGST ({calc.gstRate / 2}%)</span>
+                                <span>{formatCurrency(calc.cgst)}</span>
+                              </div>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-500">SGST ({calc.gstRate / 2}%)</span>
+                                <span>{formatCurrency(calc.sgst)}</span>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="flex justify-between text-sm">
+                              <span className="text-gray-500">IGST ({calc.gstRate}%)</span>
+                              <span>{formatCurrency(calc.igst)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-sm font-bold border-t border-gray-200 pt-1.5">
+                            <span>Total</span>
+                            <span className="text-navy-600">{formatCurrency(calc.total)}</span>
+                          </div>
+                        </div>
                       </div>
                     )}
-
-                    {/* Qty & Selling Price row */}
-                    <div className={`grid gap-3 ${gstMode === 'different' ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Qty</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={item.qty}
-                          onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
-                        />
-                        {qtyExceedsStock && (
-                          <div className="flex items-center mt-1 text-xs text-amber-600">
-                            <AlertCircle className="h-3 w-3 mr-1 flex-shrink-0" />
-                            Stock: {stock}
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Price (Incl. GST)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={item.sellingPrice}
-                          onChange={(e) => updateLineItem(index, 'sellingPrice', parseFloat(e.target.value) || 0)}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
-                        />
-                      </div>
-                      {gstMode === 'different' && (
-                        <div>
-                          <label className="block text-xs font-medium text-gray-500 mb-1">GST %</label>
-                          <Select
-                            options={GST_RATE_OPTIONS}
-                            value={GST_RATE_OPTIONS.find(o => o.value === item.gst_rate) || null}
-                            onChange={(selected) => updateLineItem(index, 'gst_rate', selected?.value ?? 18)}
-                            menuPortalTarget={document.body}
-                          />
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Calculated amounts */}
-                    <div className="bg-gray-50 rounded-lg p-3 space-y-1.5">
-                      <div className="flex justify-between text-sm">
-                        <span className="text-gray-500">Taxable Amt</span>
-                        <span>{formatCurrency(calc.taxableAmount)}</span>
-                      </div>
-                      <div className="flex justify-between text-xs text-gray-400">
-                        <span>GST {calc.gstRate}%</span>
-                        <span>{formatCurrency(calc.totalGst)}</span>
-                      </div>
-                      {gstType === 'INTRA' ? (
-                        <>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-gray-500">CGST ({calc.gstRate / 2}%)</span>
-                            <span>{formatCurrency(calc.cgst)}</span>
-                          </div>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-gray-500">SGST ({calc.gstRate / 2}%)</span>
-                            <span>{formatCurrency(calc.sgst)}</span>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="flex justify-between text-sm">
-                          <span className="text-gray-500">IGST ({calc.gstRate}%)</span>
-                          <span>{formatCurrency(calc.igst)}</span>
-                        </div>
-                      )}
-                      <div className="flex justify-between text-sm font-bold border-t border-gray-200 pt-1.5">
-                        <span>Total</span>
-                        <span className="text-navy-600">{formatCurrency(calc.total)}</span>
-                      </div>
-                    </div>
                   </div>
                 )
               })}
+            </div>
+
+            {/* Add Item / Voice — visible on every screen, at the bottom of the list */}
+            <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={addLineItem}
+                  className="w-full py-3 border-2 border-dashed border-gray-300 hover:border-navy-400 hover:bg-navy-50 rounded-xl text-gray-700 hover:text-navy-700 transition flex items-center justify-center font-medium"
+                >
+                  <Plus className="h-5 w-5 mr-2" />
+                  Add Item
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleVoice}
+                  disabled={isProcessingVoice || !selectedCustomerId}
+                  className={`w-full py-3 rounded-xl flex items-center justify-center font-medium transition ${
+                    isListening
+                      ? 'bg-red-600 text-white hover:bg-red-700 animate-pulse'
+                      : isProcessingVoice
+                        ? 'bg-gray-200 text-gray-500'
+                        : !selectedCustomerId
+                          ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                          : 'bg-navy-700 text-white hover:bg-navy-800'
+                  }`}
+                  title={!selectedCustomerId ? 'Select a customer first' : 'Tap to dictate items'}
+                >
+                  {isProcessingVoice ? (
+                    <>
+                      <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+                      Processing...
+                    </>
+                  ) : isListening ? (
+                    <>
+                      <MicOff className="h-5 w-5 mr-2" />
+                      Stop & Add Items
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="h-5 w-5 mr-2" />
+                      Dictate Items
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Live transcript while listening */}
+              {(isListening || voiceTranscript) && (
+                <div className="rounded-xl border border-navy-200 bg-navy-50 p-3">
+                  <p className="text-xs font-semibold text-navy-700 mb-1">
+                    {isListening ? 'Listening...' : 'Heard:'}
+                  </p>
+                  <p className="text-sm text-gray-800 italic">
+                    {voiceTranscript || (isListening ? 'Start speaking — e.g. "10 pieces of aluminium pipe, 5 numbers of L-bracket"' : '')}
+                  </p>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>

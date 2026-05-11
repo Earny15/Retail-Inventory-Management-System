@@ -139,6 +139,90 @@ Matching rules:
 }
 
 /**
+ * Match a voice transcript to a list of line items (SKU + optional quantity).
+ * The user may dictate multiple items in one breath, e.g.
+ *   "10 pieces of aluminium pipe 25mm, 5 nos of L-bracket large, 20 sheets of channel"
+ * Returns: [{ matched_sku_id, matched_sku_name, quantity, confidence }, ...]
+ */
+export async function extractInvoiceItemsFromVoice(transcript, skuList) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key is not configured. Set VITE_ANTHROPIC_API_KEY in .env')
+  }
+  if (!transcript || !transcript.trim()) {
+    return { items: [] }
+  }
+
+  const skuListCompact = skuList.map(s => ({
+    id: s.id,
+    code: s.sku_code,
+    name: s.sku_name,
+    uom: s.unit_of_measure
+  }))
+
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-7',
+      max_tokens: 2048,
+      messages: [{
+        role: 'user',
+        content: `You are helping an aluminium hardware shop owner dictate an invoice in spoken English/Hindi mix.
+
+The user dictated this (auto-transcribed, may have errors):
+"${transcript}"
+
+Match each item they mentioned to the SKU catalogue below.
+
+SKU CATALOGUE:
+${JSON.stringify(skuListCompact)}
+
+Return ONLY a JSON object (no markdown, no commentary):
+{
+  "items": [
+    {
+      "matched_sku_id": "UUID from catalogue or null",
+      "matched_sku_name": "internal SKU name or null",
+      "quantity": number (default 1 if not stated),
+      "confidence": number between 0-100,
+      "heard_as": "verbatim phrase from transcript"
+    }
+  ]
+}
+
+Rules:
+- One entry per distinct item mentioned. Order matches the order spoken.
+- "PCS", "pieces", "nos", "numbers", "pcs", "pc" all mean pieces.
+- If a quantity is mentioned (e.g. "10 pieces of X", "five X"), set quantity to that number. Otherwise default to 1.
+- Use semantic matching on aluminium product names, sizes, types. Be liberal with matches when product names sound similar to a SKU.
+- Set confidence 80-100 for clear matches, 50-79 for plausible, below 50 if unsure.
+- If you genuinely cannot match an item, still include the entry with matched_sku_id=null so the user knows you heard it.`
+      }]
+    })
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.text()
+    let errorMsg = `Anthropic API error: ${response.status}`
+    try {
+      const errJson = JSON.parse(errorBody)
+      errorMsg = errJson.error?.message || errorMsg
+    } catch {}
+    throw new Error(errorMsg)
+  }
+
+  const data = await response.json()
+  const text = data.content.find(b => b.type === 'text')?.text || '{}'
+  const cleanText = text.replace(/```json|```/g, '').trim()
+  return JSON.parse(cleanText)
+}
+
+/**
  * Convert file to base64 string
  */
 export function fileToBase64(file) {

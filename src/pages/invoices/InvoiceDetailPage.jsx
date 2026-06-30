@@ -246,34 +246,37 @@ export default function InvoiceDetailPage() {
         title={`Invoice ${invoice.invoice_number}`}
         description={`Created on ${formatDate(invoice.invoice_date)}`}
         actions={
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => navigate('/invoices')}>
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back
+          <div className="grid grid-cols-2 gap-2 w-full sm:w-auto sm:flex sm:flex-wrap">
+            <Button variant="outline" size="sm" onClick={() => navigate('/invoices')}>
+              <ArrowLeft className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Back</span>
+              <span className="sm:hidden">Back</span>
             </Button>
             <Button
               variant="outline"
+              size="sm"
               onClick={() => {
-                // Load saved values for this invoice from localStorage
                 const saved = JSON.parse(localStorage.getItem(`invoice-pdf-${invoice.id}`) || '{}')
                 setVehicleNo(saved.vehicleNo || '')
                 setEwayBillNo(saved.ewayBillNo || '')
                 setDownloadModalOpen(true)
               }}
             >
-              <Download className="h-4 w-4 mr-2" />
-              Download PDF
+              <Download className="h-4 w-4 mr-1.5" />
+              <span className="truncate">PDF</span>
             </Button>
             <Button
               variant="outline"
+              size="sm"
               onClick={() => generateLinkMutation.mutate()}
               disabled={generateLinkMutation.isPending}
             >
-              <FileText className="h-4 w-4 mr-2" />
-              {generateLinkMutation.isPending ? 'Generating...' : 'Generate Public Link'}
+              <FileText className="h-4 w-4 mr-1.5" />
+              <span className="truncate">{generateLinkMutation.isPending ? 'Generating…' : 'Public Link'}</span>
             </Button>
             <Button
               variant="outline"
+              size="sm"
               className="text-green-600 hover:text-green-800 border-green-300"
               onClick={() => {
                 if (!invoice.public_pdf_url) {
@@ -284,25 +287,26 @@ export default function InvoiceDetailPage() {
                 setWhatsappModalOpen(true)
               }}
             >
-              <Send className="h-4 w-4 mr-2" />
-              Send WhatsApp
+              <Send className="h-4 w-4 mr-1.5" />
+              <span className="truncate">WhatsApp</span>
             </Button>
             <Button
               variant="outline"
               size="sm"
               onClick={() => navigate(`/whatsapp-logs?invoice=${invoice.id}`)}
             >
-              <FileText className="h-4 w-4 mr-2" />
-              WA Logs
+              <FileText className="h-4 w-4 mr-1.5" />
+              <span className="truncate">WA Logs</span>
             </Button>
             {isActive && (
               <PermissionGate module="customer_invoice" action="edit">
                 <Button
                   variant="outline"
+                  size="sm"
                   onClick={() => navigate(`/invoices/${invoice.id}/edit`)}
                 >
-                  <Pencil className="h-4 w-4 mr-2" />
-                  Edit Invoice
+                  <Pencil className="h-4 w-4 mr-1.5" />
+                  <span className="truncate">Edit</span>
                 </Button>
               </PermissionGate>
             )}
@@ -310,11 +314,12 @@ export default function InvoiceDetailPage() {
               <PermissionGate module="customer_invoice" action="edit">
                 <Button
                   variant="outline"
-                  className="text-red-600 hover:text-red-800 border-red-300"
+                  size="sm"
+                  className="text-red-600 hover:text-red-800 border-red-300 col-span-2 sm:col-span-1"
                   onClick={() => setCancelModalOpen(true)}
                 >
-                  <XCircle className="h-4 w-4 mr-2" />
-                  Cancel Invoice
+                  <XCircle className="h-4 w-4 mr-1.5" />
+                  <span className="truncate">Cancel Invoice</span>
                 </Button>
               </PermissionGate>
             )}

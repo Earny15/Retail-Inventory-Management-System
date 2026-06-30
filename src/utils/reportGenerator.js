@@ -48,13 +48,14 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
   doc.text(`Total Records: ${invoices.length}`, 14, 38)
   doc.setTextColor(0)
 
-  const headers = [['#', 'Invoice No', 'Date', 'Customer', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status']]
+  const headers = [['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status']]
 
   const rows = invoices.map((inv, i) => [
     i + 1,
     inv.invoice_number,
     formatDate(inv.invoice_date),
     inv.customers?.customer_name || '-',
+    inv.customers?.gstin || '-',
     inv.customer_invoice_items?.length || 0,
     formatCurrency(inv.subtotal),
     formatCurrency(inv.cgst_amount),
@@ -77,7 +78,7 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
   }), { subtotal: 0, cgst: 0, sgst: 0, igst: 0, totalGst: 0, grandTotal: 0, items: 0 })
 
   rows.push([
-    '', '', '', 'TOTAL', totals.items,
+    '', '', '', 'TOTAL', '', totals.items,
     formatCurrency(totals.subtotal), formatCurrency(totals.cgst), formatCurrency(totals.sgst),
     formatCurrency(totals.igst), formatCurrency(totals.totalGst), formatCurrency(totals.grandTotal), ''
   ])
@@ -105,13 +106,14 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
  * Generate Invoice Report as CSV
  */
 export function generateInvoiceReportCSV(invoices, { fromDate, toDate }) {
-  const headers = ['#', 'Invoice No', 'Date', 'Customer', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status', 'Due Date', 'Paid Amount']
+  const headers = ['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status', 'Due Date', 'Paid Amount']
 
   const rows = invoices.map((inv, i) => [
     i + 1,
     inv.invoice_number,
     formatDate(inv.invoice_date),
     `"${inv.customers?.customer_name || '-'}"`,
+    `"${inv.customers?.gstin || '-'}"`,
     inv.customer_invoice_items?.length || 0,
     inv.subtotal || 0,
     inv.cgst_amount || 0,

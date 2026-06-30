@@ -63,6 +63,8 @@ export default function InvoiceListPage() {
   const [reportModalOpen, setReportModalOpen] = useState(false)
   const [reportFromDate, setReportFromDate] = useState('')
   const [reportToDate, setReportToDate] = useState('')
+  const [reportCustomerFilter, setReportCustomerFilter] = useState('')
+  const [reportStatusFilter, setReportStatusFilter] = useState('')
   const [isGeneratingReport, setIsGeneratingReport] = useState(false)
 
   // Download modal state
@@ -207,13 +209,15 @@ export default function InvoiceListPage() {
           id, invoice_number, invoice_date, due_date, status,
           subtotal, cgst_amount, sgst_amount, igst_amount, total_gst_amount, total_amount,
           paid_amount,
-          customers(customer_name),
+          customers(customer_name, gstin),
           customer_invoice_items(id)
         `)
         .order('invoice_date', { ascending: false })
 
       if (reportFromDate) query = query.gte('invoice_date', reportFromDate)
       if (reportToDate) query = query.lte('invoice_date', reportToDate)
+      if (reportCustomerFilter) query = query.eq('customer_id', reportCustomerFilter)
+      if (reportStatusFilter) query = query.eq('status', reportStatusFilter)
 
       const { data, error } = await query
       if (error) throw error
@@ -252,7 +256,16 @@ export default function InvoiceListPage() {
         description="Manage outward invoices and track sales"
         actions={
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => { setReportFromDate(''); setReportToDate(''); setReportModalOpen(true) }}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setReportFromDate('')
+                setReportToDate('')
+                setReportCustomerFilter('')
+                setReportStatusFilter('')
+                setReportModalOpen(true)
+              }}
+            >
               <FileDown className="h-4 w-4 mr-2" />
               Report
             </Button>
@@ -407,7 +420,7 @@ export default function InvoiceListPage() {
       <Modal isOpen={reportModalOpen} onClose={() => setReportModalOpen(false)} title="Generate Invoice Report" size="md">
         <div className="space-y-4">
           <p className="text-sm text-gray-600">
-            Select a date range and download the invoice report with all details.
+            Filter invoices and download the report. Leave any filter empty to include all.
           </p>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -429,7 +442,28 @@ export default function InvoiceListPage() {
               />
             </div>
           </div>
-          <p className="text-xs text-gray-500">Leave empty to include all invoices.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
+              <Select
+                options={customerOptions}
+                value={customerOptions.find(o => o.value === reportCustomerFilter) || customerOptions[0]}
+                onChange={(selected) => setReportCustomerFilter(selected?.value || '')}
+                placeholder="All Customers"
+                menuPortalTarget={document.body}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+              <Select
+                options={STATUS_OPTIONS}
+                value={STATUS_OPTIONS.find(o => o.value === reportStatusFilter) || STATUS_OPTIONS[0]}
+                onChange={(selected) => setReportStatusFilter(selected?.value || '')}
+                placeholder="All Status"
+                menuPortalTarget={document.body}
+              />
+            </div>
+          </div>
           <div className="flex justify-end gap-3 pt-4 border-t">
             <Button variant="outline" onClick={() => setReportModalOpen(false)}>Cancel</Button>
             <Button

@@ -30,6 +30,12 @@ const Select = forwardRef(({
       boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
       zIndex: 50
     }),
+    // When the menu is portaled out to document.body (e.g. inside a Modal),
+    // it needs a z-index higher than the Modal overlay (which sits at z-50).
+    menuPortal: (base) => ({
+      ...base,
+      zIndex: 9999
+    }),
     option: (base, state) => ({
       ...base,
       backgroundColor: state.isFocused ? '#f3f4f6' : 'white',

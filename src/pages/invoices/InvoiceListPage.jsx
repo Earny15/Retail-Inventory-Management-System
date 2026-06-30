@@ -142,6 +142,36 @@ export default function InvoiceListPage() {
   const totalCount = queryResult?.totalCount || 0
   const totalPages = Math.ceil(totalCount / PAGE_SIZE)
 
+  // Stats are only shown when at least one filter is active, to avoid
+  // pulling totals across the entire invoice history.
+  const filtersActive = !!(searchTerm || statusFilter || customerFilter || startDate || endDate)
+
+  const { data: filteredStats } = useQuery({
+    queryKey: ['invoice-stats', statusFilter, customerFilter, startDate, endDate, searchTerm],
+    queryFn: async () => {
+      let q = supabase
+        .from('customer_invoices')
+        .select('subtotal, total_gst_amount, total_amount', { count: 'exact' })
+      if (statusFilter) q = q.eq('status', statusFilter)
+      if (customerFilter) q = q.eq('customer_id', customerFilter)
+      if (startDate) q = q.gte('invoice_date', startDate)
+      if (endDate) q = q.lte('invoice_date', endDate)
+      if (searchTerm) q = q.ilike('invoice_number', `%${searchTerm}%`)
+      const { data, error, count } = await q
+      if (error) throw error
+      const totals = (data || []).reduce(
+        (acc, r) => ({
+          invoiceValue: acc.invoiceValue + (r.total_amount || 0),
+          taxableAmount: acc.taxableAmount + (r.subtotal || 0),
+          gstAmount: acc.gstAmount + (r.total_gst_amount || 0)
+        }),
+        { invoiceValue: 0, taxableAmount: 0, gstAmount: 0 }
+      )
+      return { ...totals, count: count || 0 }
+    },
+    enabled: filtersActive
+  })
+
   const getStatusBadge = (status) => {
     if (status === 'ACTIVE') return <Badge variant="info">ACTIVE</Badge>
     if (status === 'CANCELLED') return <Badge variant="danger">CANCELLED</Badge>
@@ -280,6 +310,29 @@ export default function InvoiceListPage() {
           </div>
         }
       />
+
+      {/* Stats — shown only when at least one filter is active */}
+      {filtersActive && filteredStats && (
+        <div className="mb-4 sm:mb-6">
+          <div className="text-xs sm:text-sm text-gray-500 mb-2">
+            Stats for {filteredStats.count} filtered invoice{filteredStats.count === 1 ? '' : 's'}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="rounded-xl border border-navy-100 bg-navy-50 p-4">
+              <div className="text-xs font-medium text-navy-700 uppercase tracking-wide">Invoice Value</div>
+              <div className="mt-1 text-xl sm:text-2xl font-bold text-navy-900">{formatCurrency(filteredStats.invoiceValue)}</div>
+            </div>
+            <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+              <div className="text-xs font-medium text-emerald-700 uppercase tracking-wide">Taxable Amount</div>
+              <div className="mt-1 text-xl sm:text-2xl font-bold text-emerald-900">{formatCurrency(filteredStats.taxableAmount)}</div>
+            </div>
+            <div className="rounded-xl border border-amber-100 bg-amber-50 p-4">
+              <div className="text-xs font-medium text-amber-700 uppercase tracking-wide">GST Amount</div>
+              <div className="mt-1 text-xl sm:text-2xl font-bold text-amber-900">{formatCurrency(filteredStats.gstAmount)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Card>
         <CardHeader>

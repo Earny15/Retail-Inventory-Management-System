@@ -68,6 +68,7 @@ export default function App() {
 
         <Route path="/invoices" element={<InvoiceListPage />} />
         <Route path="/invoices/new" element={<NewInvoicePage />} />
+        <Route path="/invoices/:id/edit" element={<NewInvoicePage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
 
         <Route path="/quotations" element={<QuotationListPage />} />

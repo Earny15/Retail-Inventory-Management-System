@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../../services/supabase'
 import { useAuth } from '../../hooks/useAuth'
 import { currencyToWords } from '../../utils/numberToWords'
 import { extractInvoiceItemsFromVoice } from '../../services/anthropic'
+import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -67,6 +68,10 @@ export default function NewInvoicePage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { user } = useAuth()
+
+  // Edit mode: /invoices/:id/edit
+  const { id: editingInvoiceId } = useParams()
+  const isEditMode = !!editingInvoiceId
 
   // Form state
   const [selectedCustomerId, setSelectedCustomerId] = useState(null)
@@ -159,6 +164,70 @@ export default function NewInvoicePage() {
       return data
     }
   })
+
+  // Fetch existing invoice (edit mode)
+  const { data: existingInvoice, isLoading: existingLoading } = useQuery({
+    queryKey: ['invoice-edit', editingInvoiceId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('customer_invoices')
+        .select(`
+          *,
+          customer_invoice_items(*, sku:skus(id, sku_code, sku_name, unit_of_measure, hsn_code))
+        `)
+        .eq('id', editingInvoiceId)
+        .single()
+      if (error) throw error
+      return data
+    },
+    enabled: isEditMode
+  })
+
+  // Original items snapshot (for inventory rebalance on save)
+  const originalItemsRef = useRef([])
+  const [editPrepopulated, setEditPrepopulated] = useState(false)
+
+  // Prepopulate form state when existing invoice loads
+  useEffect(() => {
+    if (!isEditMode || !existingInvoice || editPrepopulated) return
+
+    if (existingInvoice.status === 'CANCELLED') {
+      toast.error('This invoice is cancelled and cannot be edited.')
+      navigate(`/invoices/${editingInvoiceId}`)
+      return
+    }
+
+    setSelectedCustomerId(existingInvoice.customer_id)
+    setInvoiceDate(existingInvoice.invoice_date)
+    setDueDate(existingInvoice.due_date || '')
+
+    const isIntra = (existingInvoice.cgst_amount || 0) > 0 || (existingInvoice.igst_amount || 0) === 0
+    setGstType(isIntra ? 'INTRA' : 'INTER')
+
+    const dbItems = existingInvoice.customer_invoice_items || []
+    const rates = [...new Set(dbItems.map(i => i.gst_rate || 0))]
+    const uniformRate = rates.length === 1 ? rates[0] : 18
+    setGstMode(rates.length === 1 ? 'same' : 'different')
+    setUniformGstRate(uniformRate)
+
+    const mappedItems = dbItems.length
+      ? dbItems.map((it, idx) => ({
+          id: Date.now() + idx,
+          sku_id: it.sku_id,
+          hsn_code: it.sku?.hsn_code || '',
+          qty: it.quantity || 1,
+          unit: it.sku?.unit_of_measure || '',
+          sellingPrice: Number(it.rate) || 0,
+          gst_rate: it.gst_rate ?? uniformRate,
+          included: true
+        }))
+      : [{ id: Date.now(), sku_id: null, hsn_code: '', qty: 1, unit: '', sellingPrice: 0, gst_rate: 18, included: true }]
+
+    setLineItems(mappedItems)
+    setExpandedItemId(mappedItems[0]?.id || null)
+    originalItemsRef.current = dbItems.map(it => ({ sku_id: it.sku_id, quantity: it.quantity || 0 }))
+    setEditPrepopulated(true)
+  }, [isEditMode, existingInvoice, editPrepopulated, editingInvoiceId, navigate])
 
   const inventoryMap = useMemo(() => {
     const map = {}
@@ -520,7 +589,132 @@ export default function NewInvoicePage() {
     return { subTotal, totalCgst, totalSgst, totalIgst, grandTotal }
   }, [lineItems, gstType, gstMode, uniformGstRate])
 
-  // Generate invoice mutation
+  // Update an existing invoice: restore old inventory, replace items, deduct new inventory,
+  // recalc totals, optionally regenerate the public PDF.
+  const updateExistingInvoice = async () => {
+    if (!existingInvoice) {
+      toast.error('Invoice not loaded yet')
+      return
+    }
+
+    setIsSubmitting(true)
+    try {
+      // 1. Restore inventory for ALL original items (undo what the original invoice deducted)
+      const inventoryDelta = {} // sku_id -> net delta to apply
+      for (const orig of originalItemsRef.current) {
+        inventoryDelta[orig.sku_id] = (inventoryDelta[orig.sku_id] || 0) + orig.quantity
+      }
+
+      // 2. Deduct quantities for the new included items
+      for (const item of lineItems) {
+        if (!item.included || !item.sku_id) continue
+        inventoryDelta[item.sku_id] = (inventoryDelta[item.sku_id] || 0) - item.qty
+      }
+
+      // 3. Apply net inventory delta in one pass (avoids reading stale current_stock per row)
+      for (const [skuId, delta] of Object.entries(inventoryDelta)) {
+        if (delta === 0) continue
+        const { data: invRow, error: invFetchErr } = await supabase
+          .from('inventory')
+          .select('current_stock, available_stock')
+          .eq('sku_id', skuId)
+          .single()
+        if (invFetchErr) throw invFetchErr
+        const newStock = (invRow?.current_stock || 0) + delta
+        const { error: invUpdErr } = await supabase
+          .from('inventory')
+          .update({ current_stock: newStock, available_stock: newStock })
+          .eq('sku_id', skuId)
+        if (invUpdErr) throw invUpdErr
+      }
+
+      // 4. Update the invoice header (totals, dates, customer)
+      const { error: updErr } = await supabase
+        .from('customer_invoices')
+        .update({
+          invoice_date: invoiceDate,
+          customer_id: selectedCustomerId,
+          subtotal: summary.subTotal,
+          cgst_amount: summary.totalCgst,
+          sgst_amount: summary.totalSgst,
+          igst_amount: summary.totalIgst,
+          total_gst_amount: summary.totalCgst + summary.totalSgst + summary.totalIgst,
+          total_amount: summary.grandTotal,
+          due_date: dueDate || null
+        })
+        .eq('id', editingInvoiceId)
+      if (updErr) throw updErr
+
+      // 5. Replace all items: delete old, insert new
+      const { error: delErr } = await supabase
+        .from('customer_invoice_items')
+        .delete()
+        .eq('invoice_id', editingInvoiceId)
+      if (delErr) throw delErr
+
+      const itemRows = lineItems
+        .filter(item => item.included && item.sku_id)
+        .map(item => {
+          const calc = calcLineItem(item)
+          return {
+            invoice_id: editingInvoiceId,
+            sku_id: item.sku_id,
+            quantity: item.qty,
+            rate: item.sellingPrice,
+            amount: calc.taxableAmount,
+            gst_rate: calc.gstRate,
+            gst_amount: calc.totalGst,
+            total_amount: calc.total,
+            description: item.hsn_code ? `HSN: ${item.hsn_code}` : null
+          }
+        })
+
+      if (itemRows.length) {
+        const { error: insErr } = await supabase
+          .from('customer_invoice_items')
+          .insert(itemRows)
+        if (insErr) throw insErr
+      }
+
+      // 6. If a public PDF link existed, regenerate it so the shared link reflects the edits
+      if (existingInvoice.public_pdf_url) {
+        try {
+          const { data: fresh, error: freshErr } = await supabase
+            .from('customer_invoices')
+            .select(`*, customers(*), customer_invoice_items(*, sku:skus(id, sku_code, sku_name, unit_of_measure, hsn_code))`)
+            .eq('id', editingInvoiceId)
+            .single()
+          if (freshErr) throw freshErr
+
+          const { data: companyData } = await supabase
+            .from('companies').select('*').order('created_at', { ascending: false }).limit(1).single()
+
+          const newUrl = await uploadInvoicePDFToStorage(fresh, companyData)
+          await supabase
+            .from('customer_invoices')
+            .update({ public_pdf_url: newUrl })
+            .eq('id', editingInvoiceId)
+        } catch (e) {
+          console.warn('Public PDF regeneration failed (saved anyway):', e)
+          toast('Invoice saved. Re-generate the public link manually from the detail page.', { icon: 'ℹ️' })
+        }
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['invoices'] })
+      queryClient.invalidateQueries({ queryKey: ['invoice-detail', editingInvoiceId] })
+      queryClient.invalidateQueries({ queryKey: ['invoice-edit', editingInvoiceId] })
+      queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      toast.success(`Invoice ${existingInvoice.invoice_number} updated`)
+      navigate(`/invoices/${editingInvoiceId}`)
+    } catch (error) {
+      console.error('Invoice update failed:', error)
+      toast.error('Failed to update invoice: ' + error.message)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  // Save: create a new invoice OR update an existing one
   const generateInvoice = async () => {
     if (!selectedCustomerId) {
       toast.error('Please select a customer')
@@ -540,6 +734,10 @@ export default function NewInvoicePage() {
     if (allItems.length !== lineItems.length) {
       toast.error('All line items must have a SKU selected')
       return
+    }
+
+    if (isEditMode) {
+      return updateExistingInvoice()
     }
 
     setIsSubmitting(true)
@@ -637,14 +835,28 @@ export default function NewInvoicePage() {
     }
   }
 
+  if (isEditMode && existingLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-96">
+        <Spinner size="xl" />
+      </div>
+    )
+  }
+
   return (
     <div>
       <div className="mb-3 sm:mb-6 flex items-center justify-between gap-2">
         <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Create New Invoice</h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">Generate a GST-compliant outward invoice</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
+            {isEditMode ? `Edit Invoice ${existingInvoice?.invoice_number || ''}` : 'Create New Invoice'}
+          </h1>
+          <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">
+            {isEditMode
+              ? 'Update items, quantities, or rates. Inventory and the public PDF link will be re-synced on save.'
+              : 'Generate a GST-compliant outward invoice'}
+          </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate('/invoices')}>
+        <Button variant="outline" size="sm" onClick={() => navigate(isEditMode ? `/invoices/${editingInvoiceId}` : '/invoices')}>
           Back
         </Button>
       </div>
@@ -1238,7 +1450,7 @@ export default function NewInvoicePage() {
 
         {/* Actions */}
         <div className="flex justify-end gap-4">
-          <Button variant="outline" onClick={() => navigate('/invoices')}>
+          <Button variant="outline" onClick={() => navigate(isEditMode ? `/invoices/${editingInvoiceId}` : '/invoices')}>
             Cancel
           </Button>
           <Button
@@ -1250,7 +1462,7 @@ export default function NewInvoicePage() {
             ) : (
               <CheckCircle className="h-4 w-4 mr-2" />
             )}
-            Generate Invoice
+            {isEditMode ? 'Save Changes' : 'Generate Invoice'}
           </Button>
         </div>
       </div>

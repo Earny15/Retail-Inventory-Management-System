@@ -26,7 +26,8 @@ import {
   Copy,
   Send,
   Plus,
-  Trash2
+  Trash2,
+  Pencil
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -294,6 +295,17 @@ export default function InvoiceDetailPage() {
               <FileText className="h-4 w-4 mr-2" />
               WA Logs
             </Button>
+            {isActive && (
+              <PermissionGate module="customer_invoice" action="edit">
+                <Button
+                  variant="outline"
+                  onClick={() => navigate(`/invoices/${invoice.id}/edit`)}
+                >
+                  <Pencil className="h-4 w-4 mr-2" />
+                  Edit Invoice
+                </Button>
+              </PermissionGate>
+            )}
             {isActive && (
               <PermissionGate module="customer_invoice" action="edit">
                 <Button

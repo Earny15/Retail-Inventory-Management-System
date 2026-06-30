@@ -54,7 +54,7 @@ export default function InvoiceListPage() {
 
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
-  const [customerFilter, setCustomerFilter] = useState('')
+  const [customerFilter, setCustomerFilter] = useState([]) // multi-select: array of customer ids
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [page, setPage] = useState(0)
@@ -63,7 +63,7 @@ export default function InvoiceListPage() {
   const [reportModalOpen, setReportModalOpen] = useState(false)
   const [reportFromDate, setReportFromDate] = useState('')
   const [reportToDate, setReportToDate] = useState('')
-  const [reportCustomerFilter, setReportCustomerFilter] = useState('')
+  const [reportCustomerFilter, setReportCustomerFilter] = useState([]) // multi-select: array of customer ids
   const [reportStatusFilter, setReportStatusFilter] = useState('')
   const [isGeneratingReport, setIsGeneratingReport] = useState(false)
 
@@ -97,10 +97,10 @@ export default function InvoiceListPage() {
     }
   })
 
-  const customerOptions = useMemo(() => [
-    { value: '', label: 'All Customers' },
-    ...customers.map(c => ({ value: c.id, label: c.customer_name }))
-  ], [customers])
+  const customerOptions = useMemo(
+    () => customers.map(c => ({ value: c.id, label: c.customer_name })),
+    [customers]
+  )
 
   const {
     data: queryResult,
@@ -127,7 +127,7 @@ export default function InvoiceListPage() {
         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
 
       if (statusFilter) query = query.eq('status', statusFilter)
-      if (customerFilter) query = query.eq('customer_id', customerFilter)
+      if (customerFilter.length > 0) query = query.in('customer_id', customerFilter)
       if (startDate) query = query.gte('invoice_date', startDate)
       if (endDate) query = query.lte('invoice_date', endDate)
       if (searchTerm) query = query.ilike('invoice_number', `%${searchTerm}%`)
@@ -144,7 +144,7 @@ export default function InvoiceListPage() {
 
   // Stats are only shown when at least one filter is active, to avoid
   // pulling totals across the entire invoice history.
-  const filtersActive = !!(searchTerm || statusFilter || customerFilter || startDate || endDate)
+  const filtersActive = !!(searchTerm || statusFilter || customerFilter.length > 0 || startDate || endDate)
 
   const { data: filteredStats } = useQuery({
     queryKey: ['invoice-stats', statusFilter, customerFilter, startDate, endDate, searchTerm],
@@ -153,7 +153,7 @@ export default function InvoiceListPage() {
         .from('customer_invoices')
         .select('subtotal, total_gst_amount, total_amount', { count: 'exact' })
       if (statusFilter) q = q.eq('status', statusFilter)
-      if (customerFilter) q = q.eq('customer_id', customerFilter)
+      if (customerFilter.length > 0) q = q.in('customer_id', customerFilter)
       if (startDate) q = q.gte('invoice_date', startDate)
       if (endDate) q = q.lte('invoice_date', endDate)
       if (searchTerm) q = q.ilike('invoice_number', `%${searchTerm}%`)
@@ -246,7 +246,7 @@ export default function InvoiceListPage() {
 
       if (reportFromDate) query = query.gte('invoice_date', reportFromDate)
       if (reportToDate) query = query.lte('invoice_date', reportToDate)
-      if (reportCustomerFilter) query = query.eq('customer_id', reportCustomerFilter)
+      if (reportCustomerFilter.length > 0) query = query.in('customer_id', reportCustomerFilter)
       if (reportStatusFilter) query = query.eq('status', reportStatusFilter)
 
       const { data, error } = await query
@@ -291,7 +291,7 @@ export default function InvoiceListPage() {
               onClick={() => {
                 setReportFromDate('')
                 setReportToDate('')
-                setReportCustomerFilter('')
+                setReportCustomerFilter([])
                 setReportStatusFilter('')
                 setReportModalOpen(true)
               }}
@@ -349,10 +349,15 @@ export default function InvoiceListPage() {
               />
             </div>
             <Select
+              isMulti
               options={customerOptions}
-              value={customerOptions.find(o => o.value === customerFilter) || customerOptions[0]}
-              onChange={(selected) => { setCustomerFilter(selected?.value || ''); setPage(0) }}
-              placeholder="Customer"
+              value={customerOptions.filter(o => customerFilter.includes(o.value))}
+              onChange={(selected) => {
+                setCustomerFilter((selected || []).map(o => o.value))
+                setPage(0)
+              }}
+              placeholder="All Customers"
+              closeMenuOnSelect={false}
             />
             <Select
               options={STATUS_OPTIONS}
@@ -499,10 +504,12 @@ export default function InvoiceListPage() {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
               <Select
+                isMulti
                 options={customerOptions}
-                value={customerOptions.find(o => o.value === reportCustomerFilter) || customerOptions[0]}
-                onChange={(selected) => setReportCustomerFilter(selected?.value || '')}
+                value={customerOptions.filter(o => reportCustomerFilter.includes(o.value))}
+                onChange={(selected) => setReportCustomerFilter((selected || []).map(o => o.value))}
                 placeholder="All Customers"
+                closeMenuOnSelect={false}
                 menuPortalTarget={document.body}
               />
             </div>

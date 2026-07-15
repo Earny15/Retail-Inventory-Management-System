@@ -760,29 +760,41 @@ export default function NewInvoicePage() {
     setIsSubmitting(true)
 
     try {
-      // Step 1: Get next invoice number
-      const { data: companyData, error: companyError } = await supabase
-        .from('companies')
-        .select('id, invoice_prefix')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single()
-
-      if (companyError) throw companyError
-
-      const { data: lastInvoice } = await supabase
-        .from('customer_invoices')
-        .select('invoice_number')
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .single()
-
-      let nextNum = 1
-      if (lastInvoice?.invoice_number) {
-        const match = lastInvoice.invoice_number.match(/(\d+)$/)
-        if (match) nextNum = parseInt(match[1], 10) + 1
+      // Step 1: Get next invoice number from the master's series counter.
+      // The value stored in invoice_number_series is the LAST used number
+      // (or the seed if no invoices yet); the next invoice uses seed + 1,
+      // zero-padded to the seed's width.
+      let companyData
+      {
+        const { data, error } = await supabase
+          .from('companies')
+          .select('id, invoice_prefix, invoice_number_series')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single()
+        if (error) throw error
+        companyData = data
       }
-      const invoiceNumber = `${companyData.invoice_prefix || 'INV-'}${nextNum}`
+
+      const rawSeries = (companyData.invoice_number_series || '').trim()
+      let baseSeries = rawSeries || '000' // fallback seed
+      // Backfill for legacy rows that have no series set yet: derive from
+      // the highest existing invoice number for this prefix.
+      if (!rawSeries) {
+        const { data: lastInvoice } = await supabase
+          .from('customer_invoices')
+          .select('invoice_number')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        if (lastInvoice?.invoice_number) {
+          const m = lastInvoice.invoice_number.match(/(\d+)$/)
+          if (m) baseSeries = m[1] // keep its width
+        }
+      }
+      const currentNum = parseInt(baseSeries, 10) || 0
+      const nextSeries = String(currentNum + 1).padStart(baseSeries.length, '0')
+      const invoiceNumber = `${companyData.invoice_prefix || 'INV-'}${nextSeries}`
 
       // Step 2: Insert customer invoice
       const { data: invoiceRecord, error: txError } = await supabase
@@ -857,8 +869,22 @@ export default function NewInvoicePage() {
         actor: user
       })
 
+      // Bump the master's number series so the next invoice uses the next value.
+      // If this fails (e.g. the column doesn't exist yet), the invoice itself
+      // is already saved — we just log and move on.
+      try {
+        await supabase
+          .from('companies')
+          .update({ invoice_number_series: nextSeries })
+          .eq('id', companyData.id)
+      } catch (e) {
+        console.warn('Failed to bump invoice_number_series:', e)
+      }
+
       queryClient.invalidateQueries({ queryKey: ['invoices'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['company-first'] })
+      queryClient.invalidateQueries({ queryKey: ['companies'] })
       toast.success(`Invoice ${invoiceNumber} generated successfully!`)
       navigate(`/invoices/${invoiceRecord.id}`)
 

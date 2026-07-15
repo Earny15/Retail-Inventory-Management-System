@@ -31,6 +31,7 @@ const companySchema = z.object({
   bank_account_number: z.string().optional().or(z.literal('')),
   ifsc_code: z.string().optional().or(z.literal('')),
   invoice_prefix: z.string().optional().or(z.literal('')),
+  invoice_number_series: z.string().optional().or(z.literal('')),
   invoice_footer: z.string().optional().or(z.literal('')),
   terms_and_conditions: z.string().optional().or(z.literal('')),
   declaration: z.string().optional().or(z.literal(''))
@@ -81,7 +82,7 @@ export default function CompanyMasterPage() {
       city: '', state: '', pincode: '', gstin: '', pan_number: '',
       phone: '', email: '',
       bank_name: '', bank_account_number: '', ifsc_code: '',
-      invoice_prefix: 'INV-', invoice_footer: '',
+      invoice_prefix: 'INV-', invoice_number_series: '000', invoice_footer: '',
       terms_and_conditions: '', declaration: ''
     }
   })
@@ -91,7 +92,7 @@ export default function CompanyMasterPage() {
       const fields = ['company_name', 'company_code', 'address_line1', 'address_line2',
         'city', 'state', 'pincode', 'gstin', 'pan_number', 'phone',
         'email', 'bank_name', 'bank_account_number', 'ifsc_code',
-        'invoice_prefix', 'invoice_footer', 'terms_and_conditions', 'declaration']
+        'invoice_prefix', 'invoice_number_series', 'invoice_footer', 'terms_and_conditions', 'declaration']
       fields.forEach(key => {
         if (company[key] != null) setValue(key, company[key])
       })
@@ -155,6 +156,7 @@ export default function CompanyMasterPage() {
       bank_account_number: data.bank_account_number || null,
       ifsc_code: data.ifsc_code || null,
       invoice_prefix: data.invoice_prefix,
+      invoice_number_series: data.invoice_number_series || '000',
       invoice_footer: data.invoice_footer || null,
       terms_and_conditions: data.terms_and_conditions || null,
       declaration: data.declaration || null,
@@ -260,7 +262,15 @@ export default function CompanyMasterPage() {
         <Card>
           <CardHeader><CardTitle>Invoice Settings</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <Input label="Invoice Prefix" required {...register('invoice_prefix')} error={errors.invoice_prefix?.message} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input label="Invoice Prefix" required {...register('invoice_prefix')} error={errors.invoice_prefix?.message} />
+              <div>
+                <Input label="Invoice Number Series" {...register('invoice_number_series')} error={errors.invoice_number_series?.message} />
+                <p className="text-xs text-gray-500 mt-1">
+                  Last-used number. Next invoice will be this +1 (e.g. "000" → next invoice "001"). The width sets the zero-padding.
+                </p>
+              </div>
+            </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Invoice Footer</label>
               <textarea rows={3} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-400 focus:border-primary-400" {...register('invoice_footer')} />

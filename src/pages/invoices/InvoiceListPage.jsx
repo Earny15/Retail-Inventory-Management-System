@@ -238,7 +238,7 @@ export default function InvoiceListPage() {
         .select(`
           id, invoice_number, invoice_date, due_date, status,
           subtotal, cgst_amount, sgst_amount, igst_amount, total_gst_amount, total_amount,
-          paid_amount,
+          paid_amount, public_pdf_url,
           customers(customer_name, gstin),
           customer_invoice_items(id)
         `)

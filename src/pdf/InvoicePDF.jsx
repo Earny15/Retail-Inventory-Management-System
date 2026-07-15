@@ -317,17 +317,6 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     color: COLORS.primary
   },
-  cancelledBanner: {
-    backgroundColor: '#fed7d7',
-    padding: 6,
-    alignItems: 'center',
-    borderBottom: B
-  },
-  cancelledText: {
-    fontSize: 14,
-    fontFamily: 'Helvetica-Bold',
-    color: '#c53030'
-  }
 })
 
 const fmt = (amount) => {
@@ -374,7 +363,6 @@ function blobToDataUri(blob) {
 
 function InvoicePDFDocument({ invoice, company, vehicleNo, ewayBillNo, logoDataUri }) {
   const isIntraState = (invoice.cgst_amount || 0) > 0 || (invoice.igst_amount || 0) === 0
-  const isCancelled = invoice.status === 'CANCELLED'
   const items = invoice.customer_invoice_items || []
   const customer = invoice.customers || {}
 
@@ -412,12 +400,6 @@ function InvoicePDFDocument({ invoice, company, vehicleNo, ewayBillNo, logoDataU
     <Document>
       <Page size="A4" style={styles.page}>
         <View style={styles.outerBorder}>
-          {isCancelled && (
-            <View style={styles.cancelledBanner}>
-              <Text style={styles.cancelledText}>CANCELLED</Text>
-            </View>
-          )}
-
           {/* HEADER */}
           <View style={styles.headerSection}>
             <View style={styles.headerTop}>

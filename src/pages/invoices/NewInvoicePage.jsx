@@ -881,6 +881,29 @@ export default function NewInvoicePage() {
         console.warn('Failed to bump invoice_number_series:', e)
       }
 
+      // Auto-generate the public PDF link so the invoice report can include a
+      // direct download URL and users don't have to click "Generate Public Link"
+      // manually on each invoice. Best-effort: failure doesn't block the save.
+      try {
+        const { data: fullInvoice, error: fullErr } = await supabase
+          .from('customer_invoices')
+          .select(`
+            *,
+            customers(*),
+            customer_invoice_items(*, sku:skus(id, sku_code, sku_name, unit_of_measure, hsn_code))
+          `)
+          .eq('id', invoiceRecord.id)
+          .single()
+        if (fullErr) throw fullErr
+        const publicUrl = await uploadInvoicePDFToStorage(fullInvoice, companyData)
+        await supabase
+          .from('customer_invoices')
+          .update({ public_pdf_url: publicUrl })
+          .eq('id', invoiceRecord.id)
+      } catch (e) {
+        console.warn('Public PDF auto-generation failed (invoice was still created):', e)
+      }
+
       queryClient.invalidateQueries({ queryKey: ['invoices'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
       queryClient.invalidateQueries({ queryKey: ['company-first'] })

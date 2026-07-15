@@ -48,8 +48,11 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
   doc.text(`Total Records: ${invoices.length}`, 14, 38)
   doc.setTextColor(0)
 
-  const headers = [['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status']]
+  const headers = [['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status', 'PDF']]
 
+  // The PDF column stores the raw URL as cell.raw so we can attach a link
+  // annotation over the cell in didDrawCell; didParseCell replaces the
+  // visible text with "Download" (or "-" if no URL).
   const rows = invoices.map((inv, i) => [
     i + 1,
     inv.invoice_number,
@@ -63,7 +66,8 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
     formatCurrency(inv.igst_amount),
     formatCurrency(inv.total_gst_amount),
     formatCurrency(inv.total_amount),
-    inv.status
+    inv.status,
+    inv.public_pdf_url || ''
   ])
 
   // Summary row
@@ -80,8 +84,10 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
   rows.push([
     '', '', '', 'TOTAL', '', totals.items,
     formatCurrency(totals.subtotal), formatCurrency(totals.cgst), formatCurrency(totals.sgst),
-    formatCurrency(totals.igst), formatCurrency(totals.totalGst), formatCurrency(totals.grandTotal), ''
+    formatCurrency(totals.igst), formatCurrency(totals.totalGst), formatCurrency(totals.grandTotal), '', ''
   ])
+
+  const LINK_COL = headers[0].length - 1 // index of the PDF column
 
   autoTable(doc, {
     head: headers,
@@ -96,6 +102,26 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
         data.cell.styles.fontStyle = 'bold'
         data.cell.styles.fillColor = [219, 234, 254]
       }
+      // Render the PDF cell as a clickable "Download" label (or "-" if no link)
+      if (data.section === 'body' && data.column.index === LINK_COL) {
+        const url = data.cell.raw
+        if (url) {
+          data.cell.text = ['Download']
+          data.cell.styles.textColor = [30, 64, 175]
+          data.cell.styles.fontStyle = 'italic'
+        } else if (data.row.index !== rows.length - 1) {
+          data.cell.text = ['-']
+        }
+      }
+    },
+    didDrawCell: (data) => {
+      // Attach the actual URL to the cell rectangle so clicking follows the link
+      if (data.section === 'body' && data.column.index === LINK_COL) {
+        const url = data.cell.raw
+        if (url) {
+          doc.link(data.cell.x, data.cell.y, data.cell.width, data.cell.height, { url })
+        }
+      }
     }
   })
 
@@ -106,7 +132,7 @@ export function generateInvoiceReportPDF(invoices, { fromDate, toDate, companyNa
  * Generate Invoice Report as CSV
  */
 export function generateInvoiceReportCSV(invoices, { fromDate, toDate }) {
-  const headers = ['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status', 'Due Date', 'Paid Amount']
+  const headers = ['#', 'Invoice No', 'Date', 'Customer', 'GSTIN', 'Items', 'Subtotal', 'CGST', 'SGST', 'IGST', 'Total GST', 'Grand Total', 'Status', 'Due Date', 'Paid Amount', 'PDF Link']
 
   const rows = invoices.map((inv, i) => [
     i + 1,
@@ -123,7 +149,8 @@ export function generateInvoiceReportCSV(invoices, { fromDate, toDate }) {
     inv.total_amount || 0,
     inv.status,
     formatDate(inv.due_date),
-    inv.paid_amount || 0
+    inv.paid_amount || 0,
+    inv.public_pdf_url || ''
   ])
 
   const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')

@@ -86,7 +86,7 @@ export default function NewInvoicePage() {
 
   const initialItemId = useRef(Date.now()).current
   const [lineItems, setLineItems] = useState([
-    { id: initialItemId, sku_id: null, hsn_code: '', qty: 1, unit: '', sellingPrice: 0, gst_rate: 18, included: true }
+    { id: initialItemId, sku_id: null, hsn_code: '', qty: '', unit: '', sellingPrice: 0, gst_rate: 18, included: true }
   ])
   const [isSubmitting, setIsSubmitting] = useState(false)
 
@@ -216,7 +216,7 @@ export default function NewInvoicePage() {
           gst_rate: it.gst_rate ?? uniformRate,
           included: true
         }))
-      : [{ id: Date.now(), sku_id: null, hsn_code: '', qty: 1, unit: '', sellingPrice: 0, gst_rate: 18, included: true }]
+      : [{ id: Date.now(), sku_id: null, hsn_code: '', qty: '', unit: '', sellingPrice: 0, gst_rate: 18, included: true }]
 
     setLineItems(mappedItems)
     setExpandedItemId(mappedItems[0]?.id || null)
@@ -268,7 +268,7 @@ export default function NewInvoicePage() {
       id: newId,
       sku_id: null,
       hsn_code: '',
-      qty: 1,
+      qty: '',
       unit: '',
       sellingPrice: 0,
       gst_rate: uniformGstRate,
@@ -1076,7 +1076,7 @@ export default function NewInvoicePage() {
                               min="0"
                               step="0.01"
                               value={item.qty}
-                              onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
+                              onChange={(e) => updateLineItem(index, 'qty', e.target.value === '' ? '' : (parseFloat(e.target.value) || 0))}
                               className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
                             />
                             {qtyExceedsStock && (
@@ -1243,7 +1243,7 @@ export default function NewInvoicePage() {
                               min="0"
                               step="0.01"
                               value={item.qty}
-                              onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
+                              onChange={(e) => updateLineItem(index, 'qty', e.target.value === '' ? '' : (parseFloat(e.target.value) || 0))}
                               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
                             />
                             {qtyExceedsStock && (

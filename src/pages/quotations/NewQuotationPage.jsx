@@ -32,7 +32,7 @@ export default function NewQuotationPage() {
   const [validityDate, setValidityDate] = useState('')
   const [notes, setNotes] = useState('')
   const [lineItems, setLineItems] = useState([
-    { id: Date.now(), sku_id: null, qty: 1, unit: '', sellingPrice: 0 }
+    { id: Date.now(), sku_id: null, qty: '', unit: '', sellingPrice: 0 }
   ])
 
   // Fetch customers
@@ -93,7 +93,7 @@ export default function NewQuotationPage() {
     setLineItems(prev => [...prev, {
       id: Date.now(),
       sku_id: null,
-      qty: 1,
+      qty: '',
       unit: '',
       sellingPrice: 0
     }])
@@ -274,7 +274,7 @@ export default function NewQuotationPage() {
                             min="0"
                             step="0.01"
                             value={item.qty}
-                            onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
+                            onChange={(e) => updateLineItem(index, 'qty', e.target.value === '' ? '' : (parseFloat(e.target.value) || 0))}
                             className="w-20 px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
                           />
                         </TableCell>
@@ -350,7 +350,7 @@ export default function NewQuotationPage() {
                           min="0"
                           step="0.01"
                           value={item.qty}
-                          onChange={(e) => updateLineItem(index, 'qty', parseFloat(e.target.value) || 0)}
+                          onChange={(e) => updateLineItem(index, 'qty', e.target.value === '' ? '' : (parseFloat(e.target.value) || 0))}
                           className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-400 focus:border-primary-400"
                         />
                       </div>

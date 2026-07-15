@@ -15,6 +15,7 @@ import { Spinner } from '../../components/ui/Spinner'
 import { downloadInvoicePDF, blobToDataUri } from '../../pdf/InvoicePDF'
 import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import { sendWhatsAppInvoice, extractPdfFilename } from '../../services/twilioService'
+import { logInvoiceActivity } from '../../services/invoiceActivityService'
 import {
   ArrowLeft,
   Calendar,
@@ -69,6 +70,24 @@ export default function InvoiceDetailPage() {
       if (error) throw error
       return data
     }
+  })
+
+  // Fetch activity log for this invoice
+  const { data: activityLog = [] } = useQuery({
+    queryKey: ['invoice-activity', id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('invoice_activity_logs')
+        .select('*')
+        .eq('invoice_id', id)
+        .order('created_at', { ascending: false })
+      if (error) {
+        console.warn('activity fetch failed', error.message)
+        return []
+      }
+      return data || []
+    },
+    enabled: !!id
   })
 
   // Fetch invoice
@@ -130,11 +149,20 @@ export default function InvoiceDetailPage() {
           if (invError) throw invError
         }
       }
+
+      // Step 3: Activity log
+      await logInvoiceActivity({
+        invoiceId: id,
+        action: 'cancelled',
+        details: { reason: cancellationReason },
+        actor: user
+      })
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['invoice-detail', id] })
       queryClient.invalidateQueries({ queryKey: ['invoices'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['invoice-activity', id] })
       toast.success('Invoice cancelled successfully')
       setCancelModalOpen(false)
       setCancellationReason('')
@@ -298,18 +326,16 @@ export default function InvoiceDetailPage() {
               <FileText className="h-4 w-4 mr-1.5" />
               <span className="truncate">WA Logs</span>
             </Button>
-            {isActive && (
-              <PermissionGate module="customer_invoice" action="edit">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => navigate(`/invoices/${invoice.id}/edit`)}
-                >
-                  <Pencil className="h-4 w-4 mr-1.5" />
-                  <span className="truncate">Edit</span>
-                </Button>
-              </PermissionGate>
-            )}
+            <PermissionGate module="customer_invoice" action="edit">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate(`/invoices/${invoice.id}/edit`)}
+              >
+                <Pencil className="h-4 w-4 mr-1.5" />
+                <span className="truncate">Edit</span>
+              </Button>
+            </PermissionGate>
             {isActive && (
               <PermissionGate module="customer_invoice" action="edit">
                 <Button
@@ -636,6 +662,79 @@ export default function InvoiceDetailPage() {
                 </div>
               </div>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Activity Log */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <FileText className="h-5 w-5 mr-2" />
+              Activity Log
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {activityLog.length === 0 ? (
+              <p className="text-sm text-gray-500">
+                No activity recorded yet. New entries will appear here as the invoice is edited or its status changes.
+              </p>
+            ) : (
+              <ol className="relative border-l border-gray-200 ml-2 space-y-4">
+                {activityLog.map(entry => {
+                  const badge =
+                    entry.action === 'created' ? { label: 'CREATED', cls: 'bg-emerald-100 text-emerald-700' } :
+                    entry.action === 'updated' ? { label: 'EDITED',  cls: 'bg-blue-100 text-blue-700' } :
+                    entry.action === 'cancelled' ? { label: 'CANCELLED', cls: 'bg-red-100 text-red-700' } :
+                    { label: entry.action?.toUpperCase() || 'ACTION', cls: 'bg-gray-100 text-gray-700' }
+
+                  const d = entry.details || {}
+                  const when = new Date(entry.created_at)
+                  const whenStr = when.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+
+                  return (
+                    <li key={entry.id} className="ml-4">
+                      <div className="absolute -left-1.5 mt-1.5 h-3 w-3 rounded-full bg-gray-300 border border-white" />
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
+                        <span className="text-xs text-gray-500">{whenStr}</span>
+                        {entry.actor_name && (
+                          <span className="text-xs text-gray-500">by {entry.actor_name}</span>
+                        )}
+                      </div>
+                      <div className="text-sm text-gray-700 space-y-1">
+                        {entry.action === 'created' && (
+                          <p>
+                            Invoice created with <strong>{d.items_count || 0}</strong> item{d.items_count === 1 ? '' : 's'} • Total <strong>{formatCurrency(d.total)}</strong>
+                          </p>
+                        )}
+                        {entry.action === 'updated' && (
+                          <>
+                            {(d.prev_total !== undefined && d.next_total !== undefined && d.prev_total !== d.next_total) && (
+                              <p>Total changed: <span className="line-through text-gray-400">{formatCurrency(d.prev_total)}</span> → <strong>{formatCurrency(d.next_total)}</strong></p>
+                            )}
+                            {Array.isArray(d.items_added) && d.items_added.length > 0 && (
+                              <p className="text-emerald-700">Added: {d.items_added.map(x => `${x.sku_name} (${x.qty})`).join(', ')}</p>
+                            )}
+                            {Array.isArray(d.items_removed) && d.items_removed.length > 0 && (
+                              <p className="text-red-700">Removed: {d.items_removed.map(x => `${x.sku_name} (${x.qty})`).join(', ')}</p>
+                            )}
+                            {Array.isArray(d.items_qty_changed) && d.items_qty_changed.length > 0 && (
+                              <p className="text-blue-700">Qty changed: {d.items_qty_changed.map(x => `${x.sku_name} (${x.prev_qty} → ${x.next_qty})`).join(', ')}</p>
+                            )}
+                            {(!d.items_added?.length && !d.items_removed?.length && !d.items_qty_changed?.length) && (
+                              <p className="text-gray-500">Header details updated.</p>
+                            )}
+                          </>
+                        )}
+                        {entry.action === 'cancelled' && (
+                          <p>Invoice cancelled{d.reason ? ` — reason: ${d.reason}` : ''}</p>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ol>
+            )}
           </CardContent>
         </Card>
 

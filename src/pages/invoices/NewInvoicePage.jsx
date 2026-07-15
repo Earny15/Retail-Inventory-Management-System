@@ -6,6 +6,7 @@ import { useAuth } from '../../hooks/useAuth'
 import { currencyToWords } from '../../utils/numberToWords'
 import { extractInvoiceItemsFromVoice } from '../../services/anthropic'
 import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
+import { logInvoiceActivity, buildEditDiff } from '../../services/invoiceActivityService'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -190,12 +191,6 @@ export default function NewInvoicePage() {
   // Prepopulate form state when existing invoice loads
   useEffect(() => {
     if (!isEditMode || !existingInvoice || editPrepopulated) return
-
-    if (existingInvoice.status === 'CANCELLED') {
-      toast.error('This invoice is cancelled and cannot be edited.')
-      navigate(`/invoices/${editingInvoiceId}`)
-      return
-    }
 
     setSelectedCustomerId(existingInvoice.customer_id)
     setInvoiceDate(existingInvoice.invoice_date)
@@ -599,33 +594,35 @@ export default function NewInvoicePage() {
 
     setIsSubmitting(true)
     try {
-      // 1. Restore inventory for ALL original items (undo what the original invoice deducted)
-      const inventoryDelta = {} // sku_id -> net delta to apply
-      for (const orig of originalItemsRef.current) {
-        inventoryDelta[orig.sku_id] = (inventoryDelta[orig.sku_id] || 0) + orig.quantity
-      }
+      const wasCancelled = existingInvoice.status === 'CANCELLED'
 
-      // 2. Deduct quantities for the new included items
-      for (const item of lineItems) {
-        if (!item.included || !item.sku_id) continue
-        inventoryDelta[item.sku_id] = (inventoryDelta[item.sku_id] || 0) - item.qty
-      }
-
-      // 3. Apply net inventory delta in one pass (avoids reading stale current_stock per row)
-      for (const [skuId, delta] of Object.entries(inventoryDelta)) {
-        if (delta === 0) continue
-        const { data: invRow, error: invFetchErr } = await supabase
-          .from('inventory')
-          .select('current_stock, available_stock')
-          .eq('sku_id', skuId)
-          .single()
-        if (invFetchErr) throw invFetchErr
-        const newStock = (invRow?.current_stock || 0) + delta
-        const { error: invUpdErr } = await supabase
-          .from('inventory')
-          .update({ current_stock: newStock, available_stock: newStock })
-          .eq('sku_id', skuId)
-        if (invUpdErr) throw invUpdErr
+      // Cancelled invoices already had their inventory restored during cancellation,
+      // and the edited items should not re-deduct stock (the invoice remains cancelled).
+      // For ACTIVE invoices we net the delta: restore original items, deduct new items.
+      if (!wasCancelled) {
+        const inventoryDelta = {} // sku_id -> net delta to apply
+        for (const orig of originalItemsRef.current) {
+          inventoryDelta[orig.sku_id] = (inventoryDelta[orig.sku_id] || 0) + orig.quantity
+        }
+        for (const item of lineItems) {
+          if (!item.included || !item.sku_id) continue
+          inventoryDelta[item.sku_id] = (inventoryDelta[item.sku_id] || 0) - item.qty
+        }
+        for (const [skuId, delta] of Object.entries(inventoryDelta)) {
+          if (delta === 0) continue
+          const { data: invRow, error: invFetchErr } = await supabase
+            .from('inventory')
+            .select('current_stock, available_stock')
+            .eq('sku_id', skuId)
+            .single()
+          if (invFetchErr) throw invFetchErr
+          const newStock = (invRow?.current_stock || 0) + delta
+          const { error: invUpdErr } = await supabase
+            .from('inventory')
+            .update({ current_stock: newStock, available_stock: newStock })
+            .eq('sku_id', skuId)
+          if (invUpdErr) throw invUpdErr
+        }
       }
 
       // 4. Update the invoice header (totals, dates, customer)
@@ -700,9 +697,29 @@ export default function NewInvoicePage() {
         }
       }
 
+      // Log the edit for the activity trail
+      const diff = buildEditDiff({
+        originalDbItems: existingInvoice.customer_invoice_items || [],
+        newLineItems: lineItems,
+        skus
+      })
+      const prevTotal = Number(existingInvoice.total_amount) || 0
+      await logInvoiceActivity({
+        invoiceId: editingInvoiceId,
+        action: 'updated',
+        details: {
+          prev_total: prevTotal,
+          next_total: summary.grandTotal,
+          status: existingInvoice.status,
+          ...diff
+        },
+        actor: user
+      })
+
       queryClient.invalidateQueries({ queryKey: ['invoices'] })
       queryClient.invalidateQueries({ queryKey: ['invoice-detail', editingInvoiceId] })
       queryClient.invalidateQueries({ queryKey: ['invoice-edit', editingInvoiceId] })
+      queryClient.invalidateQueries({ queryKey: ['invoice-activity', editingInvoiceId] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
       toast.success(`Invoice ${existingInvoice.invoice_number} updated`)
       navigate(`/invoices/${editingInvoiceId}`)
@@ -821,6 +838,24 @@ export default function NewInvoicePage() {
           })
           .eq('sku_id', item.sku_id)
       }
+
+      // Activity: invoice created
+      const createdItems = lineItems
+        .filter(i => i.included && i.sku_id)
+        .map(i => {
+          const s = skus.find(x => x.id === i.sku_id)
+          return { sku_name: s?.sku_name || 'Unknown SKU', qty: i.qty }
+        })
+      await logInvoiceActivity({
+        invoiceId: invoiceRecord.id,
+        action: 'created',
+        details: {
+          total: summary.grandTotal,
+          items_count: createdItems.length,
+          items: createdItems
+        },
+        actor: user
+      })
 
       queryClient.invalidateQueries({ queryKey: ['invoices'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })

@@ -14,6 +14,7 @@ import { Modal } from '../../components/ui/Modal'
 import { Table, TableHead, TableBody, TableRow, TableHeader, TableCell } from '../../components/ui/Table'
 import { Spinner } from '../../components/ui/Spinner'
 import { downloadInvoicePDF, blobToDataUri } from '../../pdf/InvoicePDF'
+import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import { generateInvoiceReportPDF, generateInvoiceReportCSV } from '../../utils/reportGenerator'
 import {
   Plus,
@@ -22,7 +23,8 @@ import {
   Download,
   ChevronLeft,
   ChevronRight,
-  FileDown
+  FileDown,
+  Link as LinkIcon
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -73,6 +75,15 @@ export default function InvoiceListPage() {
   const [vehicleNo, setVehicleNo] = useState('')
   const [ewayBillNo, setEwayBillNo] = useState('')
   const [isDownloading, setIsDownloading] = useState(false)
+
+  // Backfill state (for legacy invoices missing public_pdf_url)
+  const [backfillModalOpen, setBackfillModalOpen] = useState(false)
+  const [backfillTotal, setBackfillTotal] = useState(0)
+  const [backfillDone, setBackfillDone] = useState(0)
+  const [backfillFailed, setBackfillFailed] = useState(0)
+  const [backfillFailedIds, setBackfillFailedIds] = useState([])
+  const [backfillRunning, setBackfillRunning] = useState(false)
+  const [backfillFinished, setBackfillFinished] = useState(false)
 
   // Fetch company for PDF
   const { data: company } = useQuery({
@@ -271,6 +282,88 @@ export default function InvoiceListPage() {
     }
   }
 
+  const openBackfillModal = async () => {
+    setBackfillFinished(false)
+    setBackfillDone(0)
+    setBackfillFailed(0)
+    setBackfillFailedIds([])
+    setBackfillTotal(0)
+    setBackfillModalOpen(true)
+    // Count how many invoices need a link so the user can decide whether to run
+    const { count, error } = await supabase
+      .from('customer_invoices')
+      .select('id', { count: 'exact', head: true })
+      .is('public_pdf_url', null)
+    if (error) {
+      toast.error('Could not count invoices: ' + error.message)
+      return
+    }
+    setBackfillTotal(count || 0)
+  }
+
+  const runBackfill = async () => {
+    if (!company) {
+      toast.error('Company info not loaded — wait a moment and retry.')
+      return
+    }
+    setBackfillRunning(true)
+    setBackfillFinished(false)
+    setBackfillDone(0)
+    setBackfillFailed(0)
+    setBackfillFailedIds([])
+
+    try {
+      // Fetch IDs of every invoice without a public link. We fetch full data
+      // per-invoice inside the loop so a very large backlog doesn't spike memory.
+      const { data: pending, error: listErr } = await supabase
+        .from('customer_invoices')
+        .select('id, invoice_number')
+        .is('public_pdf_url', null)
+        .order('invoice_date', { ascending: true })
+      if (listErr) throw listErr
+
+      setBackfillTotal(pending?.length || 0)
+      if (!pending || pending.length === 0) {
+        setBackfillFinished(true)
+        return
+      }
+
+      for (const row of pending) {
+        try {
+          const { data: fullInvoice, error: fetchErr } = await supabase
+            .from('customer_invoices')
+            .select(`
+              *,
+              customers(*),
+              customer_invoice_items(*, sku:skus(id, sku_code, sku_name, unit_of_measure, hsn_code))
+            `)
+            .eq('id', row.id)
+            .single()
+          if (fetchErr) throw fetchErr
+
+          const publicUrl = await uploadInvoicePDFToStorage(fullInvoice, company)
+          const { error: updErr } = await supabase
+            .from('customer_invoices')
+            .update({ public_pdf_url: publicUrl })
+            .eq('id', row.id)
+          if (updErr) throw updErr
+
+          setBackfillDone(d => d + 1)
+        } catch (err) {
+          console.warn('Backfill failed for', row.invoice_number, err)
+          setBackfillFailed(f => f + 1)
+          setBackfillFailedIds(list => [...list, row.invoice_number])
+        }
+      }
+
+      setBackfillFinished(true)
+      // Refresh the list so the newly-populated URLs appear in future reports
+      // and detail-page checks.
+    } finally {
+      setBackfillRunning(false)
+    }
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -299,6 +392,12 @@ export default function InvoiceListPage() {
               <FileDown className="h-4 w-4 mr-2" />
               Report
             </Button>
+            <PermissionGate module="customer_invoice" action="edit">
+              <Button variant="outline" onClick={openBackfillModal}>
+                <LinkIcon className="h-4 w-4 mr-2" />
+                Backfill Links
+              </Button>
+            </PermissionGate>
             <PermissionGate module="customer_invoice" action="create">
               <Link to="/invoices/new">
                 <Button>
@@ -542,6 +641,92 @@ export default function InvoiceListPage() {
               {isGeneratingReport ? 'Generating...' : 'Download PDF'}
             </Button>
           </div>
+        </div>
+      </Modal>
+
+      {/* Backfill Public Links Modal */}
+      <Modal
+        isOpen={backfillModalOpen}
+        onClose={() => { if (!backfillRunning) setBackfillModalOpen(false) }}
+        title="Backfill Public PDF Links"
+        size="md"
+      >
+        <div className="space-y-4">
+          {!backfillRunning && !backfillFinished && (
+            <>
+              <p className="text-sm text-gray-600">
+                Generates and uploads the PDF for every invoice that doesn't already have a public link.
+                Existing invoices with a public link are skipped. This runs against production data —
+                any browser tab close before it finishes will stop the batch mid-way (already-processed
+                invoices stay saved).
+              </p>
+              <div className="rounded-lg bg-gray-50 p-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Invoices without a link:</span>
+                  <span className="font-semibold text-gray-900">{backfillTotal}</span>
+                </div>
+              </div>
+              {backfillTotal === 0 ? (
+                <p className="text-sm text-emerald-700">Nothing to do — every invoice already has a public link.</p>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  Estimated time: ~{Math.ceil(backfillTotal * 2)} seconds (about 2s per invoice).
+                </p>
+              )}
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <Button variant="outline" onClick={() => setBackfillModalOpen(false)}>Close</Button>
+                <Button onClick={runBackfill} disabled={backfillTotal === 0}>
+                  <LinkIcon className="h-4 w-4 mr-2" />
+                  Start Backfill
+                </Button>
+              </div>
+            </>
+          )}
+
+          {backfillRunning && (
+            <>
+              <p className="text-sm text-gray-600">
+                Processing invoices. Please leave this tab open until it finishes.
+              </p>
+              <div className="rounded-lg bg-gray-50 p-3 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">Progress</span>
+                  <span className="font-medium text-gray-900">
+                    {backfillDone + backfillFailed} of {backfillTotal}
+                  </span>
+                </div>
+                <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                  <div
+                    className="h-full bg-navy-600 transition-all"
+                    style={{ width: `${backfillTotal ? ((backfillDone + backfillFailed) / backfillTotal) * 100 : 0}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-gray-500 pt-1">
+                  <span>Succeeded: <strong className="text-emerald-700">{backfillDone}</strong></span>
+                  <span>Failed: <strong className="text-red-700">{backfillFailed}</strong></span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {backfillFinished && !backfillRunning && (
+            <>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+                <p className="text-sm font-semibold text-emerald-800">
+                  Done. {backfillDone} succeeded{backfillFailed > 0 ? `, ${backfillFailed} failed` : ''}.
+                </p>
+                {backfillFailedIds.length > 0 && (
+                  <p className="text-xs text-emerald-700 mt-1">
+                    Failed invoices: {backfillFailedIds.slice(0, 10).join(', ')}
+                    {backfillFailedIds.length > 10 && ` (+${backfillFailedIds.length - 10} more)`}. Retry via the invoice detail page.
+                  </p>
+                )}
+              </div>
+              <div className="flex justify-end gap-3 pt-4 border-t">
+                <Button onClick={() => setBackfillModalOpen(false)}>Close</Button>
+              </div>
+            </>
+          )}
         </div>
       </Modal>
 

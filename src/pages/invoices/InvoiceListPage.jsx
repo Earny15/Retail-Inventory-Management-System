@@ -1,6 +1,9 @@
 import React, { useState, useMemo } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import JSZip from 'jszip'
+import { pdf } from '@react-pdf/renderer'
+import InvoicePDFDocument from '../../pdf/InvoicePDF'
 import { supabase } from '../../services/supabase'
 import { useAuth } from '../../hooks/useAuth'
 import PermissionGate from '../../components/shared/PermissionGate'
@@ -24,7 +27,8 @@ import {
   ChevronLeft,
   ChevronRight,
   FileDown,
-  Link as LinkIcon
+  Link as LinkIcon,
+  Archive
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -75,6 +79,10 @@ export default function InvoiceListPage() {
   const [vehicleNo, setVehicleNo] = useState('')
   const [ewayBillNo, setEwayBillNo] = useState('')
   const [isDownloading, setIsDownloading] = useState(false)
+
+  // ZIP-download state for the current filter
+  const [isZipping, setIsZipping] = useState(false)
+  const [zipProgress, setZipProgress] = useState({ done: 0, total: 0 })
 
   // Backfill state (for legacy invoices missing public_pdf_url)
   const [backfillModalOpen, setBackfillModalOpen] = useState(false)
@@ -282,6 +290,94 @@ export default function InvoiceListPage() {
     }
   }
 
+  // Sanitize an invoice number for use in a filename inside the ZIP.
+  const safeInvoiceFilename = (invNo) => {
+    const clean = String(invNo || 'invoice').replace(/[\\/:*?"<>|]/g, '_')
+    return `${clean}.pdf`
+  }
+
+  // Download every invoice matching the current filters as PDFs bundled in a ZIP.
+  const downloadFilteredAsZip = async () => {
+    if (!company) {
+      toast.error('Company info not loaded — wait a moment and retry.')
+      return
+    }
+    if (isZipping) return
+    setIsZipping(true)
+    setZipProgress({ done: 0, total: 0 })
+
+    try {
+      // Re-run the same filtered query but WITHOUT pagination so we cover
+      // everything the current filters match (not just this page's 20 rows).
+      let q = supabase
+        .from('customer_invoices')
+        .select(`
+          *,
+          customers(*),
+          customer_invoice_items(*, sku:skus(id, sku_code, sku_name, unit_of_measure, hsn_code))
+        `)
+        .order('invoice_date', { ascending: false })
+      if (statusFilter) q = q.eq('status', statusFilter)
+      if (customerFilter.length > 0) q = q.in('customer_id', customerFilter)
+      if (startDate) q = q.gte('invoice_date', startDate)
+      if (endDate) q = q.lte('invoice_date', endDate)
+      if (searchTerm) q = q.ilike('invoice_number', `%${searchTerm}%`)
+
+      const { data: rows, error } = await q
+      if (error) throw error
+      if (!rows || rows.length === 0) {
+        toast.error('No invoices to download for the current filters.')
+        return
+      }
+
+      setZipProgress({ done: 0, total: rows.length })
+      const zip = new JSZip()
+      const failed = []
+
+      for (const inv of rows) {
+        try {
+          const blob = await pdf(
+            React.createElement(InvoicePDFDocument, {
+              invoice: inv,
+              company,
+              vehicleNo: '',
+              ewayBillNo: '',
+              logoDataUri: null
+            })
+          ).toBlob()
+          zip.file(safeInvoiceFilename(inv.invoice_number), blob)
+        } catch (e) {
+          console.warn('Failed to render PDF for', inv.invoice_number, e)
+          failed.push(inv.invoice_number)
+        }
+        setZipProgress(p => ({ ...p, done: p.done + 1 }))
+      }
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' })
+      const stamp = new Date().toISOString().split('T')[0]
+      const url = URL.createObjectURL(zipBlob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Invoices_${stamp}.zip`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      if (failed.length === 0) {
+        toast.success(`Downloaded ${rows.length} invoice${rows.length === 1 ? '' : 's'} as ZIP`)
+      } else {
+        toast(`Downloaded ${rows.length - failed.length} of ${rows.length}. Failed: ${failed.join(', ')}`, { icon: '⚠️' })
+      }
+    } catch (err) {
+      console.error('ZIP download failed:', err)
+      toast.error('ZIP download failed: ' + err.message)
+    } finally {
+      setIsZipping(false)
+      setZipProgress({ done: 0, total: 0 })
+    }
+  }
+
   const openBackfillModal = async () => {
     setBackfillFinished(false)
     setBackfillDone(0)
@@ -413,8 +509,23 @@ export default function InvoiceListPage() {
       {/* Stats — shown only when at least one filter is active */}
       {filtersActive && filteredStats && (
         <div className="mb-4 sm:mb-6">
-          <div className="text-xs sm:text-sm text-gray-500 mb-2">
-            Stats for {filteredStats.count} filtered invoice{filteredStats.count === 1 ? '' : 's'}
+          <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
+            <div className="text-xs sm:text-sm text-gray-500">
+              Stats for {filteredStats.count} filtered invoice{filteredStats.count === 1 ? '' : 's'}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={downloadFilteredAsZip}
+              disabled={isZipping || filteredStats.count === 0}
+            >
+              <Archive className="h-4 w-4 mr-1.5" />
+              {isZipping
+                ? (zipProgress.total > 0
+                    ? `Preparing ZIP… ${zipProgress.done}/${zipProgress.total}`
+                    : 'Preparing ZIP…')
+                : `Download ${filteredStats.count} as ZIP`}
+            </Button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="rounded-xl border border-navy-100 bg-navy-50 p-4">

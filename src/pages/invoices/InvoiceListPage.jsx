@@ -506,26 +506,34 @@ export default function InvoiceListPage() {
         }
       />
 
-      {/* Stats — shown only when at least one filter is active */}
-      {filtersActive && filteredStats && (
-        <div className="mb-4 sm:mb-6">
-          <div className="flex items-center justify-between gap-3 mb-2 flex-wrap">
-            <div className="text-xs sm:text-sm text-gray-500">
-              Stats for {filteredStats.count} filtered invoice{filteredStats.count === 1 ? '' : 's'}
-            </div>
+      {/* ZIP download — always visible. Count comes from filtered stats when a
+          filter is active, or the total invoice count otherwise. */}
+      {(() => {
+        const zipCount = filtersActive ? (filteredStats?.count ?? 0) : totalCount
+        return (
+          <div className="mb-3 sm:mb-4 flex justify-end">
             <Button
               size="sm"
               variant="outline"
               onClick={downloadFilteredAsZip}
-              disabled={isZipping || filteredStats.count === 0}
+              disabled={isZipping || zipCount === 0}
             >
               <Archive className="h-4 w-4 mr-1.5" />
               {isZipping
                 ? (zipProgress.total > 0
                     ? `Preparing ZIP… ${zipProgress.done}/${zipProgress.total}`
                     : 'Preparing ZIP…')
-                : `Download ${filteredStats.count} as ZIP`}
+                : `Download ${zipCount || ''} as ZIP`.trim()}
             </Button>
+          </div>
+        )
+      })()}
+
+      {/* Stats — shown only when at least one filter is active */}
+      {filtersActive && filteredStats && (
+        <div className="mb-4 sm:mb-6">
+          <div className="text-xs sm:text-sm text-gray-500 mb-2">
+            Stats for {filteredStats.count} filtered invoice{filteredStats.count === 1 ? '' : 's'}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="rounded-xl border border-navy-100 bg-navy-50 p-4">

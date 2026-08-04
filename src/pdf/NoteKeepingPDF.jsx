@@ -21,8 +21,6 @@ const styles = StyleSheet.create({
   logo: { width: 50, height: 50, objectFit: 'contain', marginRight: 12 },
   companyName: { fontSize: 16, fontFamily: 'Helvetica-Bold', color: COLORS.primary },
   companyMeta: { fontSize: 8, color: COLORS.textLight, marginTop: 2 },
-  titleRow: { padding: 8, alignItems: 'center', backgroundColor: COLORS.tableHeaderBg, borderBottom: B },
-  title: { fontSize: 12, fontFamily: 'Helvetica-Bold', color: COLORS.primary },
   metaRow: { flexDirection: 'row', borderBottom: B },
   metaCell: { flex: 1, padding: 8, borderRight: B },
   metaLabel: { fontSize: 7, color: COLORS.textLight, marginBottom: 2 },
@@ -70,11 +68,6 @@ function NoteKeepingPDFDocument({ invoice, company, logoDataUri }) {
               {companyAddress ? <Text style={styles.companyMeta}>{companyAddress}</Text> : null}
               {company?.phone ? <Text style={styles.companyMeta}>Phone: {company.phone}</Text> : null}
             </View>
-          </View>
-
-          {/* Title */}
-          <View style={styles.titleRow}>
-            <Text style={styles.title}>NOTE KEEPING</Text>
           </View>
 
           {/* Meta */}

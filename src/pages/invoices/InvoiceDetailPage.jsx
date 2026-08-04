@@ -17,6 +17,11 @@ import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import { sendWhatsAppInvoice, extractPdfFilename } from '../../services/twilioService'
 import { logInvoiceActivity } from '../../services/invoiceActivityService'
 import {
+  nextNoteKeepingNumber,
+  recomputeCustomerInvoiceSeries,
+  logNoteKeepingActivity
+} from '../../services/noteKeepingService'
+import {
   ArrowLeft,
   Calendar,
   Building,
@@ -28,7 +33,8 @@ import {
   Send,
   Plus,
   Trash2,
-  Pencil
+  Pencil,
+  Notebook
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -61,6 +67,7 @@ export default function InvoiceDetailPage() {
   const [ewayBillNo, setEwayBillNo] = useState('')
   const [whatsappModalOpen, setWhatsappModalOpen] = useState(false)
   const [whatsappPhones, setWhatsappPhones] = useState([''])
+  const [convertModalOpen, setConvertModalOpen] = useState(false)
 
   // Fetch company for PDF
   const { data: company } = useQuery({
@@ -170,6 +177,135 @@ export default function InvoiceDetailPage() {
     onError: (error) => {
       toast.error('Failed to cancel invoice: ' + error.message)
     }
+  })
+
+  // Convert this customer invoice into a note keeping entry.
+  // - Creates a new NK invoice using the current NK number series.
+  // - Each line item's amount becomes (taxable + gst_amount) — i.e. the total
+  //   inclusive-of-GST value, since NK doesn't track tax.
+  // - Restores inventory the original customer invoice consumed.
+  // - Deletes the customer invoice.
+  // - Recomputes the customer number series so the freed-up number can be
+  //   reused on the next new customer invoice.
+  // - Logs the conversion on the new NK invoice with a link back.
+  const convertMutation = useMutation({
+    mutationFn: async () => {
+      if (!invoice) throw new Error('Invoice not loaded')
+      if (invoice.status !== 'ACTIVE') throw new Error('Only ACTIVE invoices can be converted')
+
+      // 1) Allocate the next NK number and pre-read the company row so we can
+      //    bump the series after the insert succeeds.
+      const { invoiceNumber: nkNumber, nextSeries: nkNextSeries, company: nkCompany } =
+        await nextNoteKeepingNumber()
+
+      // 2) Build the NK header + items. Each item's NK amount is the total
+      //    inclusive of GST (taxable + gst).
+      const items = invoice.customer_invoice_items || []
+      const nkItems = items.map(it => {
+        const taxable = Number(it.amount) || 0
+        const gst = Number(it.gst_amount) || 0
+        const qty = Number(it.quantity) || 0
+        const totalInclusive = taxable + gst
+        const rateInclusive = qty > 0 ? totalInclusive / qty : (Number(it.rate) || 0)
+        return {
+          sku_id: it.sku_id,
+          quantity: qty,
+          rate: Number(rateInclusive.toFixed(2)),
+          amount: Number(totalInclusive.toFixed(2))
+        }
+      })
+      const nkTotal = nkItems.reduce((s, i) => s + i.amount, 0)
+
+      const { data: nkRecord, error: nkErr } = await supabase
+        .from('note_keeping_invoices')
+        .insert({
+          invoice_number: nkNumber,
+          invoice_date: invoice.invoice_date,
+          due_date: invoice.due_date,
+          customer_id: invoice.customer_id,
+          status: 'ACTIVE',
+          total_amount: nkTotal,
+          converted_from_invoice_id: invoice.id,
+          converted_from_invoice_number: invoice.invoice_number,
+          created_by: user?.id
+        })
+        .select()
+        .single()
+      if (nkErr) throw nkErr
+
+      if (nkItems.length) {
+        const rows = nkItems.map(r => ({ ...r, invoice_id: nkRecord.id }))
+        const { error: nkItemsErr } = await supabase
+          .from('note_keeping_invoice_items').insert(rows)
+        if (nkItemsErr) throw nkItemsErr
+      }
+
+      // 3) Bump the NK series
+      try {
+        await supabase
+          .from('companies')
+          .update({ note_keeping_number_series: nkNextSeries })
+          .eq('id', nkCompany.id)
+      } catch (e) { console.warn('NK series bump failed:', e) }
+
+      // 4) Restore inventory the customer invoice had deducted
+      for (const it of items) {
+        try {
+          const { data: inv } = await supabase
+            .from('inventory')
+            .select('current_stock, available_stock')
+            .eq('sku_id', it.sku_id)
+            .single()
+          if (inv) {
+            const restored = (inv.current_stock || 0) + (Number(it.quantity) || 0)
+            await supabase
+              .from('inventory')
+              .update({ current_stock: restored, available_stock: restored })
+              .eq('sku_id', it.sku_id)
+          }
+        } catch (e) { console.warn('Inventory restore skipped for', it.sku_id, e) }
+      }
+
+      // 5) Delete the customer invoice (items cascade via FK)
+      const { error: delItemsErr } = await supabase
+        .from('customer_invoice_items').delete().eq('invoice_id', invoice.id)
+      if (delItemsErr) throw delItemsErr
+      const { error: delErr } = await supabase
+        .from('customer_invoices').delete().eq('id', invoice.id)
+      if (delErr) throw delErr
+
+      // 6) Recompute the customer series so the freed-up number is reusable
+      let resetSeries = null
+      try {
+        resetSeries = await recomputeCustomerInvoiceSeries()
+      } catch (e) { console.warn('Customer series recompute failed:', e) }
+
+      // 7) Activity: log on the new NK invoice with a reference back
+      await logNoteKeepingActivity({
+        invoiceId: nkRecord.id,
+        action: 'converted_from_customer_invoice',
+        details: {
+          source_invoice_id: invoice.id,
+          source_invoice_number: invoice.invoice_number,
+          total: nkTotal,
+          items_count: nkItems.length,
+          customer_series_reset: resetSeries
+        },
+        actor: user
+      })
+
+      return nkRecord
+    },
+    onSuccess: (nk) => {
+      queryClient.invalidateQueries({ queryKey: ['invoices'] })
+      queryClient.invalidateQueries({ queryKey: ['nk-invoices'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['company-first'] })
+      toast.success(`Converted to Note Keeping ${nk.invoice_number}`)
+      setConvertModalOpen(false)
+      navigate(`/note-keeping/${nk.id}`)
+    },
+    onError: (err) => toast.error('Conversion failed: ' + err.message)
   })
 
   // Generate public link mutation
@@ -336,6 +472,18 @@ export default function InvoiceDetailPage() {
                 <span className="truncate">Edit</span>
               </Button>
             </PermissionGate>
+            {isActive && (
+              <PermissionGate module="customer_invoice" action="edit">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConvertModalOpen(true)}
+                >
+                  <Notebook className="h-4 w-4 mr-1.5" />
+                  <span className="truncate">To Note Keeping</span>
+                </Button>
+              </PermissionGate>
+            )}
             {isActive && (
               <PermissionGate module="customer_invoice" action="edit">
                 <Button
@@ -928,6 +1076,41 @@ export default function InvoiceDetailPage() {
             >
               <Send className="h-4 w-4 mr-2" />
               {whatsappMutation.isPending ? 'Sending...' : `Send to ${whatsappPhones.filter(p => p.trim()).length} number(s)`}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Convert to Note Keeping Modal */}
+      <Modal
+        isOpen={convertModalOpen}
+        onClose={() => { if (!convertMutation.isPending) setConvertModalOpen(false) }}
+        title="Convert to Note Keeping"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+            <div className="flex items-start">
+              <AlertTriangle className="h-5 w-5 text-yellow-600 mr-2 flex-shrink-0 mt-0.5" />
+              <div className="text-sm text-yellow-800">
+                <div className="font-medium mb-1">This operation is not reversible.</div>
+                <ul className="list-disc list-inside space-y-1">
+                  <li>A new note-keeping entry will be created with the current NK number series</li>
+                  <li>Each line item's amount will be the total inclusive of GST (taxable + GST)</li>
+                  <li>Inventory this invoice consumed will be restored</li>
+                  <li>This customer invoice (<strong>{invoice?.invoice_number}</strong>) will be deleted</li>
+                  <li>The invoice-number series will recompute — the freed-up number becomes available for the next new invoice</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-4">
+            <Button variant="outline" onClick={() => setConvertModalOpen(false)} disabled={convertMutation.isPending}>
+              Close
+            </Button>
+            <Button onClick={() => convertMutation.mutate()} disabled={convertMutation.isPending}>
+              {convertMutation.isPending ? <Spinner size="sm" className="mr-2" /> : <Notebook className="h-4 w-4 mr-2" />}
+              Convert
             </Button>
           </div>
         </div>

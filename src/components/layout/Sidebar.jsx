@@ -4,7 +4,7 @@ import {
   LayoutDashboard, FileText, FilePlus, PackageOpen, PackagePlus,
   Package, History, BarChart3, Building2, Layers, Users, Truck,
   UserCog, X, ChevronDown, ChevronRight, ClipboardList, ClipboardPlus,
-  MessageCircle
+  MessageCircle, Notebook, NotebookPen
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -21,6 +21,7 @@ const navGroups = [
     items: [
       { name: 'New Invoice', href: '/invoices/new', icon: FilePlus },
       { name: 'Invoice List', href: '/invoices', icon: FileText },
+      { name: 'Note Keeping', href: '/note-keeping', icon: Notebook },
     ]
   },
   {

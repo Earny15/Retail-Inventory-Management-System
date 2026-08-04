@@ -32,6 +32,8 @@ const companySchema = z.object({
   ifsc_code: z.string().optional().or(z.literal('')),
   invoice_prefix: z.string().optional().or(z.literal('')),
   invoice_number_series: z.string().optional().or(z.literal('')),
+  note_keeping_prefix: z.string().optional().or(z.literal('')),
+  note_keeping_number_series: z.string().optional().or(z.literal('')),
   invoice_footer: z.string().optional().or(z.literal('')),
   terms_and_conditions: z.string().optional().or(z.literal('')),
   declaration: z.string().optional().or(z.literal(''))
@@ -82,7 +84,9 @@ export default function CompanyMasterPage() {
       city: '', state: '', pincode: '', gstin: '', pan_number: '',
       phone: '', email: '',
       bank_name: '', bank_account_number: '', ifsc_code: '',
-      invoice_prefix: 'INV-', invoice_number_series: '000', invoice_footer: '',
+      invoice_prefix: 'INV-', invoice_number_series: '000',
+      note_keeping_prefix: 'NK-', note_keeping_number_series: '000',
+      invoice_footer: '',
       terms_and_conditions: '', declaration: ''
     }
   })
@@ -92,7 +96,9 @@ export default function CompanyMasterPage() {
       const fields = ['company_name', 'company_code', 'address_line1', 'address_line2',
         'city', 'state', 'pincode', 'gstin', 'pan_number', 'phone',
         'email', 'bank_name', 'bank_account_number', 'ifsc_code',
-        'invoice_prefix', 'invoice_number_series', 'invoice_footer', 'terms_and_conditions', 'declaration']
+        'invoice_prefix', 'invoice_number_series',
+        'note_keeping_prefix', 'note_keeping_number_series',
+        'invoice_footer', 'terms_and_conditions', 'declaration']
       fields.forEach(key => {
         if (company[key] != null) setValue(key, company[key])
       })
@@ -157,6 +163,8 @@ export default function CompanyMasterPage() {
       ifsc_code: data.ifsc_code || null,
       invoice_prefix: data.invoice_prefix,
       invoice_number_series: data.invoice_number_series || '000',
+      note_keeping_prefix: data.note_keeping_prefix || 'NK-',
+      note_keeping_number_series: data.note_keeping_number_series || '000',
       invoice_footer: data.invoice_footer || null,
       terms_and_conditions: data.terms_and_conditions || null,
       declaration: data.declaration || null,
@@ -268,6 +276,15 @@ export default function CompanyMasterPage() {
                 <Input label="Invoice Number Series" {...register('invoice_number_series')} error={errors.invoice_number_series?.message} />
                 <p className="text-xs text-gray-500 mt-1">
                   Last-used number. Next invoice will be this +1 (e.g. "000" → next invoice "001"). The width sets the zero-padding.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <Input label="Note Keeping Prefix" {...register('note_keeping_prefix')} error={errors.note_keeping_prefix?.message} />
+              <div>
+                <Input label="Note Keeping Number Series" {...register('note_keeping_number_series')} error={errors.note_keeping_number_series?.message} />
+                <p className="text-xs text-gray-500 mt-1">
+                  Same rules as the invoice series, applied to note-keeping documents (no-GST cash entries).
                 </p>
               </div>
             </div>

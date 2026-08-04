@@ -12,6 +12,9 @@ import InventoryPage from './pages/inventory/InventoryPage'
 import NewInvoicePage from './pages/invoices/NewInvoicePage'
 import InvoiceListPage from './pages/invoices/InvoiceListPage'
 import InvoiceDetailPage from './pages/invoices/InvoiceDetailPage'
+import NoteKeepingListPage from './pages/note-keeping/NoteKeepingListPage'
+import NewNoteKeepingPage from './pages/note-keeping/NewNoteKeepingPage'
+import NoteKeepingDetailPage from './pages/note-keeping/NoteKeepingDetailPage'
 import NewInwardPage from './pages/inward/NewInwardPage'
 import InwardListPage from './pages/inward/InwardListPage'
 import InwardDetailPage from './pages/inward/InwardDetailPage'
@@ -70,6 +73,11 @@ export default function App() {
         <Route path="/invoices/new" element={<NewInvoicePage />} />
         <Route path="/invoices/:id/edit" element={<NewInvoicePage />} />
         <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
+
+        <Route path="/note-keeping" element={<NoteKeepingListPage />} />
+        <Route path="/note-keeping/new" element={<NewNoteKeepingPage />} />
+        <Route path="/note-keeping/:id/edit" element={<NewNoteKeepingPage />} />
+        <Route path="/note-keeping/:id" element={<NoteKeepingDetailPage />} />
 
         <Route path="/quotations" element={<QuotationListPage />} />
         <Route path="/quotations/new" element={<NewQuotationPage />} />

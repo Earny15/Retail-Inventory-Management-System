@@ -760,10 +760,14 @@ export default function NewInvoicePage() {
     setIsSubmitting(true)
 
     try {
-      // Step 1: Get next invoice number from the master's series counter.
-      // The value stored in invoice_number_series is the LAST used number
-      // (or the seed if no invoices yet); the next invoice uses seed + 1,
-      // zero-padded to the seed's width.
+      // Step 1: Get next invoice number.
+      // Uses the master's invoice_number_series as the primary counter, but
+      // also cross-checks against the highest existing invoice number for
+      // this prefix so that a drifted series (e.g. after a convert-to-NK
+      // that decremented the series) can never produce a collision with a
+      // still-existing invoice number. invoice_number has a UNIQUE
+      // constraint at the DB level; if the computed number is already
+      // taken we keep incrementing until we find a free one.
       let companyData
       {
         const { data, error } = await supabase
@@ -778,23 +782,41 @@ export default function NewInvoicePage() {
 
       const rawSeries = (companyData.invoice_number_series || '').trim()
       let baseSeries = rawSeries || '000' // fallback seed
-      // Backfill for legacy rows that have no series set yet: derive from
-      // the highest existing invoice number for this prefix.
-      if (!rawSeries) {
-        const { data: lastInvoice } = await supabase
-          .from('customer_invoices')
-          .select('invoice_number')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-        if (lastInvoice?.invoice_number) {
-          const m = lastInvoice.invoice_number.match(/(\d+)$/)
-          if (m) baseSeries = m[1] // keep its width
+      let width = baseSeries.length || 3
+      let seriesNum = parseInt(baseSeries, 10) || 0
+
+      // Also scan all existing invoice numbers with this prefix and take the
+      // max — protects against a stale series value from any cause.
+      const prefix = companyData.invoice_prefix || 'INV-'
+      const { data: existingRows } = await supabase
+        .from('customer_invoices')
+        .select('invoice_number')
+        .ilike('invoice_number', `${prefix}%`)
+      const existingSet = new Set((existingRows || []).map(r => r.invoice_number))
+      let existingMax = 0
+      for (const r of existingRows || []) {
+        const m = String(r.invoice_number || '').match(/(\d+)$/)
+        if (m) {
+          const n = parseInt(m[1], 10)
+          if (!Number.isNaN(n)) {
+            if (n > existingMax) existingMax = n
+            if (m[1].length > width) width = m[1].length
+          }
         }
       }
-      const currentNum = parseInt(baseSeries, 10) || 0
-      const nextSeries = String(currentNum + 1).padStart(baseSeries.length, '0')
-      const invoiceNumber = `${companyData.invoice_prefix || 'INV-'}${nextSeries}`
+
+      // Start from whichever is higher, then step forward until we find a
+      // number that doesn't already exist.
+      let candidate = Math.max(seriesNum, existingMax) + 1
+      let nextSeries = String(candidate).padStart(width, '0')
+      let invoiceNumber = `${prefix}${nextSeries}`
+      let guard = 0
+      while (existingSet.has(invoiceNumber) && guard < 1000) {
+        candidate += 1
+        nextSeries = String(candidate).padStart(width, '0')
+        invoiceNumber = `${prefix}${nextSeries}`
+        guard += 1
+      }
 
       // Step 2: Insert customer invoice
       const { data: invoiceRecord, error: txError } = await supabase
@@ -913,7 +935,12 @@ export default function NewInvoicePage() {
 
     } catch (error) {
       console.error('Invoice generation failed:', error)
-      toast.error('Failed to generate invoice: ' + error.message)
+      // Surface Supabase error code + hint so tricky problems (unique
+      // violations, missing columns, RLS blocks) can be diagnosed from
+      // the toast without needing the console open.
+      const details = error?.code ? ` [${error.code}]` : ''
+      const hint = error?.hint ? ` — hint: ${error.hint}` : ''
+      toast.error('Failed to generate invoice: ' + (error.message || 'unknown error') + details + hint)
     } finally {
       setIsSubmitting(false)
     }

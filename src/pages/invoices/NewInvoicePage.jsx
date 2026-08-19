@@ -770,12 +770,28 @@ export default function NewInvoicePage() {
       // taken we keep incrementing until we find a free one.
       let companyData
       {
-        const { data, error } = await supabase
+        // Try to read the invoice_number_series column; if it doesn't exist
+        // on this DB (i.e. ADD-INVOICE-NUMBER-SERIES.sql was never applied),
+        // fall back to the base columns and treat the series as empty. The
+        // existing-max scan further down still produces a valid next number.
+        let { data, error } = await supabase
           .from('companies')
           .select('id, invoice_prefix, invoice_number_series')
           .order('created_at', { ascending: false })
           .limit(1)
           .single()
+        if (error && error.code === '42703') {
+          console.warn('invoice_number_series column missing — using fallback numbering. Run ADD-INVOICE-NUMBER-SERIES.sql to enable master-driven series.')
+          const retry = await supabase
+            .from('companies')
+            .select('id, invoice_prefix')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single()
+          if (retry.error) throw retry.error
+          data = { ...retry.data, invoice_number_series: null }
+          error = null
+        }
         if (error) throw error
         companyData = data
       }
@@ -893,12 +909,17 @@ export default function NewInvoicePage() {
 
       // Bump the master's number series so the next invoice uses the next value.
       // If this fails (e.g. the column doesn't exist yet), the invoice itself
-      // is already saved — we just log and move on.
+      // is already saved — we just log and move on. The next generateInvoice
+      // call will still produce the correct next number via the existing-max
+      // scan even without the series column.
       try {
-        await supabase
+        const { error: bumpErr } = await supabase
           .from('companies')
           .update({ invoice_number_series: nextSeries })
           .eq('id', companyData.id)
+        if (bumpErr && bumpErr.code !== '42703') {
+          console.warn('Failed to bump invoice_number_series:', bumpErr)
+        }
       } catch (e) {
         console.warn('Failed to bump invoice_number_series:', e)
       }

@@ -83,7 +83,9 @@ export function useCompanies() {
         'company_name', 'company_code', 'address_line1', 'address_line2',
         'city', 'state', 'pincode', 'phone', 'email', 'gstin', 'pan_number',
         'bank_name', 'bank_account_number', 'ifsc_code',
-        'invoice_prefix', 'invoice_footer',
+        'invoice_prefix', 'invoice_number_series',
+        'note_keeping_prefix', 'note_keeping_number_series',
+        'invoice_footer',
         'terms_and_conditions', 'declaration', 'logo_url'
       ]
       // Remove any field not in known columns
@@ -121,6 +123,10 @@ export function useCompanies() {
           .single()
 
         if (result.error) throw result.error
+        const dropped = Object.keys(safeData).filter(key => !(key in coreData))
+        if (dropped.length) {
+          toast.error(`Some fields were not saved (${dropped.join(', ')}): ${error.message}`, { duration: 8000 })
+        }
         return result.data
       }
 

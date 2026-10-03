@@ -65,6 +65,81 @@ const formatDateDDMMYYYY = (dateStr) => {
 
 const todayISO = () => new Date().toISOString().split('T')[0]
 
+// Compute the next invoice number.
+// Uses the master's invoice_number_series as the primary counter, but
+// also cross-checks against the highest existing invoice number for
+// this prefix so that a drifted series (e.g. after a convert-to-NK
+// that decremented the series) can never produce a collision with a
+// still-existing invoice number. invoice_number has a UNIQUE
+// constraint at the DB level; if the computed number is already
+// taken we keep incrementing until we find a free one.
+// Shared by the live preview and the actual save so they always agree.
+async function computeNextInvoiceNumber() {
+  // Try to read the invoice_number_series column; if it doesn't exist
+  // on this DB (i.e. ADD-INVOICE-NUMBER-SERIES.sql was never applied),
+  // fall back to the base columns and treat the series as empty. The
+  // existing-max scan further down still produces a valid next number.
+  let { data: companyData, error } = await supabase
+    .from('companies')
+    .select('id, invoice_prefix, invoice_number_series')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single()
+  if (error && error.code === '42703') {
+    console.warn('invoice_number_series column missing — using fallback numbering. Run ADD-INVOICE-NUMBER-SERIES.sql to enable master-driven series.')
+    const retry = await supabase
+      .from('companies')
+      .select('id, invoice_prefix')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single()
+    if (retry.error) throw retry.error
+    companyData = { ...retry.data, invoice_number_series: null }
+    error = null
+  }
+  if (error) throw error
+
+  const rawSeries = (companyData.invoice_number_series || '').trim()
+  const baseSeries = rawSeries || '000' // fallback seed
+  let width = baseSeries.length || 3
+  const seriesNum = parseInt(baseSeries, 10) || 0
+
+  // Also scan all existing invoice numbers with this prefix and take the
+  // max — protects against a stale series value from any cause.
+  const prefix = companyData.invoice_prefix || 'INV-'
+  const { data: existingRows } = await supabase
+    .from('customer_invoices')
+    .select('invoice_number')
+    .ilike('invoice_number', `${prefix}%`)
+  const existingSet = new Set((existingRows || []).map(r => r.invoice_number))
+  let existingMax = 0
+  for (const r of existingRows || []) {
+    const m = String(r.invoice_number || '').match(/(\d+)$/)
+    if (m) {
+      const n = parseInt(m[1], 10)
+      if (!Number.isNaN(n)) {
+        if (n > existingMax) existingMax = n
+        if (m[1].length > width) width = m[1].length
+      }
+    }
+  }
+
+  // Start from whichever is higher, then step forward until we find a
+  // number that doesn't already exist.
+  let candidate = Math.max(seriesNum, existingMax) + 1
+  let nextSeries = String(candidate).padStart(width, '0')
+  let invoiceNumber = `${prefix}${nextSeries}`
+  let guard = 0
+  while (existingSet.has(invoiceNumber) && guard < 1000) {
+    candidate += 1
+    nextSeries = String(candidate).padStart(width, '0')
+    invoiceNumber = `${prefix}${nextSeries}`
+    guard += 1
+  }
+
+  return { invoiceNumber, nextSeries, companyData }
+}
+
 export default function NewInvoicePage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -152,6 +227,16 @@ export default function NewInvoicePage() {
       }
       return data
     }
+  })
+
+  // Preview of the number this invoice will get. Always refetched on mount
+  // so it reflects any invoice created since the page was last opened.
+  const { data: nextInvoicePreview } = useQuery({
+    queryKey: ['next-invoice-number'],
+    queryFn: computeNextInvoiceNumber,
+    enabled: !isEditMode,
+    staleTime: 0,
+    refetchOnMount: 'always'
   })
 
   // Fetch inventory for stock checks
@@ -760,79 +845,9 @@ export default function NewInvoicePage() {
     setIsSubmitting(true)
 
     try {
-      // Step 1: Get next invoice number.
-      // Uses the master's invoice_number_series as the primary counter, but
-      // also cross-checks against the highest existing invoice number for
-      // this prefix so that a drifted series (e.g. after a convert-to-NK
-      // that decremented the series) can never produce a collision with a
-      // still-existing invoice number. invoice_number has a UNIQUE
-      // constraint at the DB level; if the computed number is already
-      // taken we keep incrementing until we find a free one.
-      let companyData
-      {
-        // Try to read the invoice_number_series column; if it doesn't exist
-        // on this DB (i.e. ADD-INVOICE-NUMBER-SERIES.sql was never applied),
-        // fall back to the base columns and treat the series as empty. The
-        // existing-max scan further down still produces a valid next number.
-        let { data, error } = await supabase
-          .from('companies')
-          .select('id, invoice_prefix, invoice_number_series')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single()
-        if (error && error.code === '42703') {
-          console.warn('invoice_number_series column missing — using fallback numbering. Run ADD-INVOICE-NUMBER-SERIES.sql to enable master-driven series.')
-          const retry = await supabase
-            .from('companies')
-            .select('id, invoice_prefix')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single()
-          if (retry.error) throw retry.error
-          data = { ...retry.data, invoice_number_series: null }
-          error = null
-        }
-        if (error) throw error
-        companyData = data
-      }
-
-      const rawSeries = (companyData.invoice_number_series || '').trim()
-      let baseSeries = rawSeries || '000' // fallback seed
-      let width = baseSeries.length || 3
-      let seriesNum = parseInt(baseSeries, 10) || 0
-
-      // Also scan all existing invoice numbers with this prefix and take the
-      // max — protects against a stale series value from any cause.
-      const prefix = companyData.invoice_prefix || 'INV-'
-      const { data: existingRows } = await supabase
-        .from('customer_invoices')
-        .select('invoice_number')
-        .ilike('invoice_number', `${prefix}%`)
-      const existingSet = new Set((existingRows || []).map(r => r.invoice_number))
-      let existingMax = 0
-      for (const r of existingRows || []) {
-        const m = String(r.invoice_number || '').match(/(\d+)$/)
-        if (m) {
-          const n = parseInt(m[1], 10)
-          if (!Number.isNaN(n)) {
-            if (n > existingMax) existingMax = n
-            if (m[1].length > width) width = m[1].length
-          }
-        }
-      }
-
-      // Start from whichever is higher, then step forward until we find a
-      // number that doesn't already exist.
-      let candidate = Math.max(seriesNum, existingMax) + 1
-      let nextSeries = String(candidate).padStart(width, '0')
-      let invoiceNumber = `${prefix}${nextSeries}`
-      let guard = 0
-      while (existingSet.has(invoiceNumber) && guard < 1000) {
-        candidate += 1
-        nextSeries = String(candidate).padStart(width, '0')
-        invoiceNumber = `${prefix}${nextSeries}`
-        guard += 1
-      }
+      // Step 1: Get next invoice number (recomputed fresh at save time, so
+      // it's correct even if another invoice was created since the preview).
+      const { invoiceNumber, nextSeries, companyData } = await computeNextInvoiceNumber()
 
       // Step 2: Insert customer invoice
       const { data: invoiceRecord, error: txError } = await supabase
@@ -951,6 +966,7 @@ export default function NewInvoicePage() {
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
       queryClient.invalidateQueries({ queryKey: ['company-first'] })
       queryClient.invalidateQueries({ queryKey: ['companies'] })
+      queryClient.invalidateQueries({ queryKey: ['next-invoice-number'] })
       toast.success(`Invoice ${invoiceNumber} generated successfully!`)
       navigate(`/invoices/${invoiceRecord.id}`)
 
@@ -982,6 +998,14 @@ export default function NewInvoicePage() {
           <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
             {isEditMode ? `Edit Invoice ${existingInvoice?.invoice_number || ''}` : 'Create New Invoice'}
           </h1>
+          {!isEditMode && (
+            <p className="text-sm text-gray-600 mt-1">
+              Invoice No:{' '}
+              {nextInvoicePreview
+                ? <span className="font-semibold text-primary-700">{nextInvoicePreview.invoiceNumber}</span>
+                : <span className="text-gray-400">…</span>}
+            </p>
+          )}
           <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">
             {isEditMode
               ? 'Update items, quantities, or rates. Inventory and the public PDF link will be re-synced on save.'

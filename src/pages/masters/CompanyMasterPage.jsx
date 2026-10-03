@@ -31,9 +31,9 @@ const companySchema = z.object({
   bank_account_number: z.string().optional().or(z.literal('')),
   ifsc_code: z.string().optional().or(z.literal('')),
   invoice_prefix: z.string().optional().or(z.literal('')),
-  invoice_number_series: z.string().optional().or(z.literal('')),
+  invoice_number_series: z.string().regex(/^\d{0,9}$/, 'Digits only, up to 9 (e.g. 045)').optional().or(z.literal('')),
   note_keeping_prefix: z.string().optional().or(z.literal('')),
-  note_keeping_number_series: z.string().optional().or(z.literal('')),
+  note_keeping_number_series: z.string().regex(/^\d{0,9}$/, 'Digits only, up to 9 (e.g. 045)').optional().or(z.literal('')),
   invoice_footer: z.string().optional().or(z.literal('')),
   terms_and_conditions: z.string().optional().or(z.literal('')),
   declaration: z.string().optional().or(z.literal(''))

@@ -277,7 +277,7 @@ export default function InvoiceDetailPage() {
       // 6) Recompute the customer series so the freed-up number is reusable
       let resetSeries = null
       try {
-        resetSeries = await recomputeCustomerInvoiceSeries()
+        resetSeries = await recomputeCustomerInvoiceSeries(invoice.invoice_number)
       } catch (e) { console.warn('Customer series recompute failed:', e) }
 
       // 7) Activity: log on the new NK invoice with a reference back

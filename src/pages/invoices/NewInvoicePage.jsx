@@ -7,6 +7,7 @@ import { currencyToWords } from '../../utils/numberToWords'
 import { extractInvoiceItemsFromVoice, extractCustomerInvoice, fileToBase64 } from '../../services/anthropic'
 import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import { logInvoiceActivity, buildEditDiff } from '../../services/invoiceActivityService'
+import { parseMasterSeries, parseSeriesNumber } from '../../utils/invoiceNumber'
 import PageHeader from '../../components/shared/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import Button from '../../components/ui/Button'
@@ -101,13 +102,12 @@ async function computeNextInvoiceNumber() {
   }
   if (error) throw error
 
-  const rawSeries = (companyData.invoice_number_series || '').trim()
-  const baseSeries = rawSeries || '000' // fallback seed
-  let width = baseSeries.length || 3
-  const seriesNum = parseInt(baseSeries, 10) || 0
+  const { num: seriesNum, width: seriesWidth } = parseMasterSeries(companyData.invoice_number_series)
+  let width = seriesWidth
 
   // Also scan all existing invoice numbers with this prefix and take the
-  // max — protects against a stale series value from any cause.
+  // max — protects against a stale series value from any cause. Only the
+  // part after the prefix is read, so digits in the prefix can't leak in.
   const prefix = companyData.invoice_prefix || 'INV-'
   const { data: existingRows } = await supabase
     .from('customer_invoices')
@@ -116,13 +116,10 @@ async function computeNextInvoiceNumber() {
   const existingSet = new Set((existingRows || []).map(r => r.invoice_number))
   let existingMax = 0
   for (const r of existingRows || []) {
-    const m = String(r.invoice_number || '').match(/(\d+)$/)
-    if (m) {
-      const n = parseInt(m[1], 10)
-      if (!Number.isNaN(n)) {
-        if (n > existingMax) existingMax = n
-        if (m[1].length > width) width = m[1].length
-      }
+    const parsed = parseSeriesNumber(r.invoice_number, prefix)
+    if (parsed) {
+      if (parsed.num > existingMax) existingMax = parsed.num
+      if (parsed.width > width) width = parsed.width
     }
   }
 
@@ -240,12 +237,13 @@ export default function NewInvoicePage() {
 
   // Preview of the number this invoice will get. Always refetched on mount
   // so it reflects any invoice created since the page was last opened.
-  const { data: nextInvoicePreview } = useQuery({
+  const { data: nextInvoicePreview, error: nextInvoicePreviewError } = useQuery({
     queryKey: ['next-invoice-number'],
     queryFn: computeNextInvoiceNumber,
     enabled: !isEditMode,
     staleTime: 0,
-    refetchOnMount: 'always'
+    refetchOnMount: 'always',
+    retry: false
   })
 
   // Fetch inventory for stock checks
@@ -1151,7 +1149,9 @@ export default function NewInvoicePage() {
               Invoice No:{' '}
               {nextInvoicePreview
                 ? <span className="font-semibold text-primary-700">{nextInvoicePreview.invoiceNumber}</span>
-                : <span className="text-gray-400">…</span>}
+                : nextInvoicePreviewError
+                  ? <span className="text-red-600">{nextInvoicePreviewError.message}</span>
+                  : <span className="text-gray-400">…</span>}
             </p>
           )}
           <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">

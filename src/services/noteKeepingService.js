@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { parseMasterSeries, parseSeriesNumber } from '../utils/invoiceNumber'
 
 /**
  * Compute the next NK invoice number based on the company's note_keeping series.
@@ -37,13 +38,13 @@ export async function nextNoteKeepingNumber() {
 }
 
 /**
- * Recompute the customer invoice series to match the current highest invoice
- * number for that prefix. Used after a customer invoice is converted to NK,
- * so the next new customer invoice re-uses the freed-up number.
- * If there are no customer invoices left with a numeric suffix, the series is
- * left as-is (we can't safely guess a seed).
+ * Called after a customer invoice is converted to NK (and deleted), so the
+ * freed-up number can be reused. Only steps the master series back when the
+ * freed invoice was the last one issued under the current prefix — otherwise
+ * the series (including any value the user set by hand) is left untouched.
+ * Returns the series after the call.
  */
-export async function recomputeCustomerInvoiceSeries() {
+export async function recomputeCustomerInvoiceSeries(freedInvoiceNumber) {
   const { data: company, error: compErr } = await supabase
     .from('companies')
     .select('id, invoice_prefix, invoice_number_series')
@@ -52,28 +53,22 @@ export async function recomputeCustomerInvoiceSeries() {
     .single()
   if (compErr) throw compErr
 
-  const { data: rows, error: listErr } = await supabase
-    .from('customer_invoices')
-    .select('invoice_number')
-  if (listErr) throw listErr
-
-  let maxNum = 0
-  let width = (company.invoice_number_series || '000').length
-  for (const r of rows || []) {
-    const m = String(r.invoice_number || '').match(/(\d+)$/)
-    if (m) {
-      const n = parseInt(m[1], 10)
-      if (!Number.isNaN(n) && n > maxNum) {
-        maxNum = n
-        if (m[1].length > width) width = m[1].length
-      }
-    }
+  const current = company.invoice_number_series
+  let master
+  try {
+    master = parseMasterSeries(current)
+  } catch {
+    return current // invalid master value — leave it for the user to fix
   }
-  const newSeries = String(maxNum).padStart(width, '0')
-  await supabase
+  const freed = parseSeriesNumber(freedInvoiceNumber, company.invoice_prefix || 'INV-')
+  if (!freed || freed.num !== master.num || freed.num < 1) return current
+
+  const newSeries = String(freed.num - 1).padStart(master.width, '0')
+  const { error: updErr } = await supabase
     .from('companies')
     .update({ invoice_number_series: newSeries })
     .eq('id', company.id)
+  if (updErr) throw updErr
   return newSeries
 }
 

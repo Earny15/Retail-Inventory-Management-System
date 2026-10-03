@@ -228,6 +228,171 @@ Rules:
   return JSON.parse(cleanText)
 }
 
+// JSON schema for extractCustomerInvoice — enforced by structured outputs, so
+// the response is always parseable and has every field (null when unknown).
+const nullable = (type) => ({ type: [type, 'null'] })
+const CUSTOMER_INVOICE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['customer', 'source_invoice_number', 'invoice_date', 'due_date', 'tax_type', 'grand_total', 'line_items'],
+  properties: {
+    customer: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'gstin', 'state', 'matched_customer_id', 'match_confidence'],
+      properties: {
+        name: nullable('string'),
+        gstin: nullable('string'),
+        state: nullable('string'),
+        matched_customer_id: nullable('string'),
+        match_confidence: { type: 'number' }
+      }
+    },
+    source_invoice_number: nullable('string'),
+    invoice_date: nullable('string'),
+    due_date: nullable('string'),
+    tax_type: { type: 'string', enum: ['INTRA', 'INTER', 'UNKNOWN'] },
+    grand_total: nullable('number'),
+    line_items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['description', 'hsn_code', 'quantity', 'unit', 'rate_excl_gst', 'gst_rate', 'line_total_incl_gst', 'candidates'],
+        properties: {
+          description: { type: 'string' },
+          hsn_code: nullable('string'),
+          quantity: { type: 'number' },
+          unit: nullable('string'),
+          rate_excl_gst: nullable('number'),
+          gst_rate: nullable('number'),
+          line_total_incl_gst: nullable('number'),
+          candidates: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['sku_id', 'confidence'],
+              properties: {
+                sku_id: { type: 'string' },
+                confidence: { type: 'number' }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Read an already-generated sales invoice (PDF or image) and extract what's
+ * needed to recreate it: customer (matched to our customer list), dates,
+ * GST type, and line items (matched to our SKU catalogue).
+ */
+export async function extractCustomerInvoice(fileBase64, mimeType, skuList, customerList) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error('Anthropic API key is not configured. Set VITE_ANTHROPIC_API_KEY in .env')
+  }
+
+  const supportedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+  const isPdf = mimeType === 'application/pdf'
+  if (!isPdf && !supportedImageTypes.includes(mimeType)) {
+    throw new Error(`Unsupported file type: ${mimeType}. Please upload a PDF, JPG, PNG or WebP.`)
+  }
+
+  const skuListCompact = skuList.map(s => ({
+    id: s.id,
+    code: s.sku_code,
+    name: s.sku_name,
+    uom: s.unit_of_measure,
+    hsn: s.hsn_code || undefined
+  }))
+  const customerListCompact = customerList.map(c => ({
+    id: c.id,
+    name: c.customer_name,
+    city: c.billing_city || undefined,
+    gstin: c.gstin || undefined
+  }))
+
+  const response = await fetch(ANTHROPIC_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'server-side-fallback-2026-07-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-5-5',
+      max_tokens: 16000,
+      fallbacks: 'default',
+      output_config: {
+        effort: 'medium',
+        format: { type: 'json_schema', schema: CUSTOMER_INVOICE_SCHEMA }
+      },
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: isPdf ? 'document' : 'image',
+            source: { type: 'base64', media_type: mimeType, data: fileBase64 }
+          },
+          {
+            type: 'text',
+            text: `This is a sales (outward) GST invoice from an aluminium hardware business in India. We want to recreate it in our system, so extract the buyer and every line item, and match them to our records.
+
+OUR CUSTOMERS:
+${JSON.stringify(customerListCompact)}
+
+OUR SKU CATALOGUE:
+${JSON.stringify(skuListCompact)}
+
+Customer:
+- The customer is the BUYER ("Bill to" / "Buyer" / "Consignee"), not the seller who issued the invoice.
+- matched_customer_id: the id from OUR CUSTOMERS. A matching GSTIN is a certain match (confidence 100). Otherwise match on name and city; set null if none is plausible.
+
+Dates: YYYY-MM-DD, or null if not shown.
+
+tax_type: "INTER" if the invoice charges IGST, "INTRA" if it charges CGST + SGST, "UNKNOWN" if you can't tell.
+
+Line items — one entry per invoice line, in order:
+- quantity: prefer the piece count (PCS / NOS) when the invoice shows both pieces and weight/length; otherwise the quantity shown.
+- rate_excl_gst: the per-unit rate BEFORE GST. If the invoice only shows a GST-inclusive rate, divide it by (1 + gst_rate/100).
+- gst_rate: the GST percentage for the line (total of CGST + SGST, or IGST). If only an invoice-level rate is shown, use it for every line.
+- line_total_incl_gst: the line amount including GST if shown or computable, else null.
+- candidates: up to 3 SKUs from OUR SKU CATALOGUE ranked by likelihood, matching on product type, size and section. Confidence 90-100 = unmistakable, 70-89 = strong but similar SKUs exist, below 70 = uncertain. Empty array if nothing plausible.
+
+grand_total: the invoice's final payable total.`
+          }
+        ]
+      }]
+    })
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.text()
+    let errorMsg = `Anthropic API error: ${response.status}`
+    try {
+      const errJson = JSON.parse(errorBody)
+      errorMsg = errJson.error?.message || errorMsg
+    } catch {}
+    throw new Error(errorMsg)
+  }
+
+  const data = await response.json()
+  if (data.stop_reason === 'refusal') {
+    throw new Error('The AI declined to read this file. Please fill the invoice manually.')
+  }
+  if (data.stop_reason === 'max_tokens') {
+    throw new Error('Invoice is too long to read in one go. Try uploading fewer pages.')
+  }
+  const text = data.content.find(b => b.type === 'text')?.text
+  if (!text) throw new Error('AI returned no data')
+  return JSON.parse(text)
+}
+
 /**
  * Convert file to base64 string
  */

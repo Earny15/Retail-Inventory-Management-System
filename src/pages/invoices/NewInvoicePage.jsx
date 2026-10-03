@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { supabase } from '../../services/supabase'
 import { useAuth } from '../../hooks/useAuth'
 import { currencyToWords } from '../../utils/numberToWords'
-import { extractInvoiceItemsFromVoice } from '../../services/anthropic'
+import { extractInvoiceItemsFromVoice, extractCustomerInvoice, fileToBase64 } from '../../services/anthropic'
 import { uploadInvoicePDFToStorage } from '../../services/invoicePdfService'
 import { logInvoiceActivity, buildEditDiff } from '../../services/invoiceActivityService'
 import PageHeader from '../../components/shared/PageHeader'
@@ -24,7 +24,9 @@ import {
   ChevronUp,
   Mic,
   MicOff,
-  Loader2
+  Loader2,
+  Sparkles,
+  Undo2
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -179,6 +181,13 @@ export default function NewInvoicePage() {
 
   // Confidence threshold: top candidate >= this number is auto-added
   const AUTO_MATCH_THRESHOLD = 85
+
+  // Fill with AI: summary of the last fill (drives the review banner) and a
+  // snapshot of the form before it, so the user can undo.
+  const [isAiFilling, setIsAiFilling] = useState(false)
+  const [aiFill, setAiFill] = useState(null)
+  const aiFileInputRef = useRef(null)
+  const preAiSnapshotRef = useRef(null)
 
   // Fetch customers
   const { data: customers = [] } = useQuery({
@@ -518,12 +527,151 @@ export default function NewInvoicePage() {
     }
   }
 
+  // Fill with AI: read an uploaded invoice and populate the whole form.
+  // Confident SKU matches become line items; uncertain ones go to the
+  // "confirm which SKU" panel with the invoice's own rate kept.
+  const handleAiFileSelected = async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('File is too large (max 20 MB)')
+      return
+    }
+    if (skus.length === 0) {
+      toast.error('SKU list is still loading — try again in a second.')
+      return
+    }
+
+    setIsAiFilling(true)
+    try {
+      const base64 = await fileToBase64(file)
+      const result = await extractCustomerInvoice(base64, file.type, skus, customers)
+
+      preAiSnapshotRef.current = {
+        selectedCustomerId, invoiceDate, dueDate, gstType, gstMode, uniformGstRate, lineItems, pendingMatches
+      }
+
+      const warnings = []
+      const isIsoDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)
+      const round2 = (n) => Math.round(n * 100) / 100
+
+      // Customer: an exact GSTIN match wins; otherwise trust the AI only when confident
+      const ext = result.customer || {}
+      const normGstin = (g) => (g || '').replace(/\s/g, '').toUpperCase()
+      let customer = ext.gstin ? customers.find(c => c.gstin && normGstin(c.gstin) === normGstin(ext.gstin)) : null
+      if (!customer && ext.match_confidence >= 80) {
+        customer = customers.find(c => c.id === ext.matched_customer_id) || null
+      }
+      if (customer) {
+        setSelectedCustomerId(customer.id)
+      } else {
+        setSelectedCustomerId(null)
+        warnings.push(`Customer "${ext.name || 'unknown'}"${ext.gstin ? ` (GSTIN ${ext.gstin})` : ''} not found — select or add them.`)
+      }
+
+      if (isIsoDate(result.invoice_date)) setInvoiceDate(result.invoice_date)
+      setDueDate(isIsoDate(result.due_date) ? result.due_date : '')
+      if (result.tax_type === 'INTRA' || result.tax_type === 'INTER') {
+        setGstType(result.tax_type)
+      } else {
+        warnings.push('Could not tell CGST+SGST vs IGST — check Invoice Type.')
+      }
+
+      // GST mode/rate from the lines' rates
+      const lines = result.line_items || []
+      const rates = [...new Set(lines.map(l => l.gst_rate).filter(r => r != null))]
+      const fallbackRate = rates[0] ?? uniformGstRate
+      const sameRate = rates.length <= 1
+      setGstMode(sameRate ? 'same' : 'different')
+      setUniformGstRate(fallbackRate)
+
+      const filled = []
+      const pending = []
+      lines.forEach((line, idx) => {
+        const gstRate = line.gst_rate ?? fallbackRate
+        const qty = Number(line.quantity) || 1
+        // Our selling price is per-unit and GST-inclusive
+        let sellingPrice = null
+        if (line.rate_excl_gst != null) sellingPrice = round2(line.rate_excl_gst * (1 + gstRate / 100))
+        else if (line.line_total_incl_gst != null) sellingPrice = round2(line.line_total_incl_gst / qty)
+
+        const candidates = (line.candidates || [])
+          .map(c => ({ ...c, sku: skus.find(s => s.id === c.sku_id) }))
+          .filter(c => c.sku)
+          .sort((a, b) => b.confidence - a.confidence)
+        const top = candidates[0]
+
+        if (top && top.confidence >= AUTO_MATCH_THRESHOLD) {
+          const item = buildItemFromSku(top.sku, qty, gstRate)
+          filled.push({
+            ...item,
+            id: Date.now() + idx,
+            hsn_code: top.sku.hsn_code || line.hsn_code || '',
+            sellingPrice: sellingPrice ?? item.sellingPrice
+          })
+        } else {
+          pending.push({
+            id: `pending-ai-${Date.now()}-${idx}`,
+            source: 'invoice',
+            heard_as: line.description,
+            quantity: qty,
+            sellingPrice,
+            gst_rate: gstRate,
+            candidates: candidates.slice(0, 3)
+          })
+        }
+        if (sellingPrice == null) warnings.push(`No rate found for "${line.description}" — enter it manually.`)
+      })
+
+      const emptyItem = { id: Date.now() + lines.length + 1, sku_id: null, hsn_code: '', qty: '', unit: '', sellingPrice: 0, gst_rate: fallbackRate, included: true }
+      const newItems = filled.length ? filled : [emptyItem]
+      setLineItems(newItems)
+      setPendingMatches(pending)
+      setExpandedItemId(newItems[0].id)
+
+      setAiFill({
+        fileName: file.name,
+        sourceInvoiceNumber: result.source_invoice_number,
+        extractedTotal: result.grand_total,
+        filledCount: filled.length,
+        pendingCount: pending.length,
+        warnings
+      })
+      toast.success(`Filled from ${file.name} — review before generating`)
+    } catch (err) {
+      console.error('AI fill failed:', err)
+      toast.error(`AI fill failed: ${err.message}`)
+    } finally {
+      setIsAiFilling(false)
+    }
+  }
+
+  const undoAiFill = () => {
+    const s = preAiSnapshotRef.current
+    if (s) {
+      setSelectedCustomerId(s.selectedCustomerId)
+      setInvoiceDate(s.invoiceDate)
+      setDueDate(s.dueDate)
+      setGstType(s.gstType)
+      setGstMode(s.gstMode)
+      setUniformGstRate(s.uniformGstRate)
+      setLineItems(s.lineItems)
+      setPendingMatches(s.pendingMatches)
+      setExpandedItemId(s.lineItems[0]?.id || null)
+    }
+    preAiSnapshotRef.current = null
+    setAiFill(null)
+  }
+
   // User picked a candidate for an ambiguous match
   const resolvePendingMatch = (pendingId, sku) => {
     const pending = pendingMatches.find(p => p.id === pendingId)
     if (!pending) return
-    const gstRate = gstMode === 'same' ? uniformGstRate : 18
-    const newItem = buildItemFromSku(sku, pending.quantity, gstRate)
+    const gstRate = pending.gst_rate ?? (gstMode === 'same' ? uniformGstRate : 18)
+    const built = buildItemFromSku(sku, pending.quantity, gstRate)
+    // AI-filled lines keep the rate from the uploaded invoice
+    const newItem = pending.sellingPrice != null ? { ...built, sellingPrice: pending.sellingPrice } : built
     const lastId = appendItemsToInvoice([newItem])
     setPendingMatches(prev => prev.filter(p => p.id !== pendingId))
     if (lastId) {
@@ -1012,10 +1160,72 @@ export default function NewInvoicePage() {
               : 'Generate a GST-compliant outward invoice'}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate(isEditMode ? `/invoices/${editingInvoiceId}` : '/invoices')}>
-          Back
-        </Button>
+        <div className="flex items-center gap-2">
+          {!isEditMode && (
+            <>
+              <input
+                ref={aiFileInputRef}
+                type="file"
+                accept="application/pdf,image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={handleAiFileSelected}
+              />
+              <Button
+                size="sm"
+                onClick={() => aiFileInputRef.current?.click()}
+                disabled={isAiFilling}
+                title="Upload an existing invoice (PDF or photo) to fill this form"
+              >
+                {isAiFilling
+                  ? <><Loader2 className="h-4 w-4 mr-1.5 animate-spin" />Reading invoice…</>
+                  : <><Sparkles className="h-4 w-4 mr-1.5" />Fill with AI</>}
+              </Button>
+            </>
+          )}
+          <Button variant="outline" size="sm" onClick={() => navigate(isEditMode ? `/invoices/${editingInvoiceId}` : '/invoices')}>
+            Back
+          </Button>
+        </div>
       </div>
+
+      {aiFill && (() => {
+        const totalDiff = aiFill.extractedTotal != null ? Math.abs(summary.grandTotal - aiFill.extractedTotal) : 0
+        const totalMismatch = aiFill.extractedTotal != null && pendingMatches.length === 0 && totalDiff > 1
+        const issues = [...aiFill.warnings]
+        if (pendingMatches.length) issues.push(`${pendingMatches.length} item${pendingMatches.length > 1 ? 's' : ''} need a SKU picked — see "Confirm which SKU" below the line items.`)
+        if (totalMismatch) issues.push(`Total is ${formatCurrency(summary.grandTotal)} but the uploaded invoice says ${formatCurrency(aiFill.extractedTotal)} — check quantities, rates and GST.`)
+        return (
+          <div className={`mb-4 rounded-xl border p-4 ${issues.length ? 'border-amber-300 bg-amber-50' : 'border-green-300 bg-green-50'}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2 min-w-0">
+                <Sparkles className={`h-5 w-5 mt-0.5 flex-shrink-0 ${issues.length ? 'text-amber-600' : 'text-green-600'}`} />
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-gray-900">
+                    Filled from <span className="break-all">{aiFill.fileName}</span>
+                    {aiFill.sourceInvoiceNumber && <span className="font-normal text-gray-600"> (their no. {aiFill.sourceInvoiceNumber})</span>}
+                  </p>
+                  <p className="text-xs text-gray-600 mt-0.5">
+                    Review everything below — you can edit any field. Click Generate Invoice when it looks right.
+                  </p>
+                  {issues.length > 0 ? (
+                    <ul className="mt-2 space-y-1 text-sm text-amber-900 list-disc pl-4">
+                      {issues.map((w, i) => <li key={i}>{w}</li>)}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-sm text-green-800 flex items-center gap-1">
+                      <CheckCircle className="h-4 w-4" />
+                      All items matched{aiFill.extractedTotal != null && ' and the total matches the uploaded invoice'}.
+                    </p>
+                  )}
+                </div>
+              </div>
+              <Button variant="outline" size="sm" onClick={undoAiFill} title="Restore the form to how it was before">
+                <Undo2 className="h-4 w-4 mr-1" />Undo
+              </Button>
+            </div>
+          </div>
+        )
+      })()}
 
       <div className="space-y-6">
         {/* Customer & Invoice Details */}
@@ -1500,11 +1710,14 @@ export default function NewInvoicePage() {
                     <div key={pending.id} className="bg-white rounded-lg border border-amber-200 p-3">
                       <div className="flex items-start justify-between gap-2 mb-2">
                         <div>
-                          <p className="text-xs text-gray-500">You said</p>
+                          <p className="text-xs text-gray-500">{pending.source === 'invoice' ? 'On uploaded invoice' : 'You said'}</p>
                           <p className="text-sm font-medium text-gray-900">
                             "{pending.heard_as}"
                             {pending.quantity > 1 && (
                               <span className="ml-2 text-xs text-gray-500">qty: {pending.quantity}</span>
+                            )}
+                            {pending.sellingPrice != null && (
+                              <span className="ml-2 text-xs text-gray-500">rate: {formatCurrency(pending.sellingPrice)} incl. GST</span>
                             )}
                           </p>
                         </div>

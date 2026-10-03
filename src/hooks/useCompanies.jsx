@@ -93,48 +93,41 @@ export function useCompanies() {
         if (!knownColumns.includes(key)) delete safeData[key]
       })
 
-      // First attempt with all fields
-      let { data, error } = await supabase
-        .from('companies')
-        .update(safeData)
-        .eq('id', id)
-        .select()
-        .single()
-
-      // If it fails (likely missing columns), retry with only core fields
-      if (error) {
-        console.warn('Full update failed, retrying with core fields:', error.message)
-        const coreData = {}
-        const coreColumns = [
-          'company_name', 'company_code', 'address_line1', 'address_line2',
-          'city', 'state', 'pincode', 'phone', 'email', 'gstin', 'pan_number',
-          'bank_name', 'bank_account_number', 'ifsc_code',
-          'invoice_prefix', 'invoice_footer'
-        ]
-        coreColumns.forEach(key => {
-          if (safeData[key] !== undefined) coreData[key] = safeData[key]
-        })
-
-        const result = await supabase
+      // Retry while PostgREST reports a missing column, dropping only that
+      // column — so one unmigrated column doesn't discard every other field.
+      const dropped = []
+      for (;;) {
+        const { data, error } = await supabase
           .from('companies')
-          .update(coreData)
+          .update(safeData)
           .eq('id', id)
           .select()
           .single()
 
-        if (result.error) throw result.error
-        const dropped = Object.keys(safeData).filter(key => !(key in coreData))
-        if (dropped.length) {
-          toast.error(`Some fields were not saved (${dropped.join(', ')}): ${error.message}`, { duration: 8000 })
+        if (!error) {
+          if (dropped.length) {
+            toast.error(`Not saved — column missing in database (run the migration): ${dropped.join(', ')}`, { duration: 8000 })
+          }
+          return { data, dropped }
         }
-        return result.data
-      }
 
-      return data
+        // PGRST204: "Could not find the 'x' column of 'companies' in the schema cache"
+        // 42703: undefined_column
+        const missing = error.message?.match(/'([^']+)' column/)?.[1]
+          || error.message?.match(/column "?([a-z_]+)"? .*does not exist/)?.[1]
+        if ((error.code === 'PGRST204' || error.code === '42703') && missing && missing in safeData) {
+          console.warn(`companies.${missing} missing, retrying without it`)
+          delete safeData[missing]
+          dropped.push(missing)
+          continue
+        }
+        throw error
+      }
     },
-    onSuccess: () => {
+    onSuccess: ({ dropped }) => {
       queryClient.invalidateQueries({ queryKey: ['companies'] })
-      toast.success('Company updated successfully')
+      queryClient.invalidateQueries({ queryKey: ['company-first'] })
+      if (!dropped.length) toast.success('Company updated successfully')
     },
     onError: (error) => {
       console.error('Company update error:', error)
